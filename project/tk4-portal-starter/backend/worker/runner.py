@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 
 from common.config import settings
-from common.db import add_event, replace_spool_sections, update_job
+from common.db import add_event, get_job, replace_spool_sections, update_job
 from common.spool_parser import split_spool
 from common.templates import render_template
 from worker.s3270_client import S3270Client, S3270Error
@@ -37,27 +37,48 @@ class AutomationFailure(RuntimeError):
         return base
 
 
+@dataclass
+class JobAborted(RuntimeError):
+    stage: str
+    reason: str
+
+
 def _utcnow() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
 
 
+def _guard_active_attempt(job_id: str, attempt: int, stage: str) -> dict:
+    fresh = get_job(job_id)
+    if not fresh:
+        raise JobAborted(stage=stage, reason='job_not_found')
+    if int(fresh.get('attempt') or 1) != int(attempt):
+        raise JobAborted(stage=stage, reason='attempt_superseded')
+    if fresh.get('state') == 'canceled':
+        raise JobAborted(stage=stage, reason='job_canceled')
+    return fresh
+
+
 def run_job(job: dict) -> None:
     job_id = job['id']
+    attempt = int(job.get('attempt') or 1)
     params = json.loads(job['input_params_json'])
     job_name = params['job_name']
+    _guard_active_attempt(job_id, attempt, 'starting')
     update_job(job_id, job_name=job_name)
-    add_event(job_id, 'job.state', {'state': 'starting'})
+    add_event(job_id, 'job.state', {'state': 'starting', 'attempt': attempt}, attempt=attempt)
 
-    if settings.dry_run:
-        _run_dry(job_id, job_name, params)
-        return
-
-    jcl = render_template(job['template_id'], params)
     try:
-        result = _run_real(job_id, job_name, jcl)
+        if settings.dry_run:
+            _run_dry(job_id, attempt, job_name, params)
+            return
+
+        _guard_active_attempt(job_id, attempt, 'writing_jcl')
+        jcl = render_template(job['template_id'], params)
+        result = _run_real(job_id, attempt, job_name, jcl)
+        _guard_active_attempt(job_id, attempt, 'reading_spool')
         sections = split_spool(result['raw_spool'])
-        replace_spool_sections(job_id, sections)
+        replace_spool_sections(job_id, sections, attempt=attempt)
         update_job(
             job_id,
             state='completed' if result['result'] in {'success', 'warning'} else 'failed',
@@ -68,10 +89,28 @@ def run_job(job: dict) -> None:
             stage='done',
             finished_at=_utcnow(),
         )
-        add_event(job_id, 'job.result', result)
+        add_event(job_id, 'job.result', {**result, 'attempt': attempt}, attempt=attempt)
+    except JobAborted as exc:
+        if exc.reason == 'job_canceled':
+            update_job(
+                job_id,
+                state='canceled',
+                result='canceled',
+                stage='canceled',
+                finished_at=_utcnow(),
+            )
+            add_event(job_id, 'job.canceled', {'stage': exc.stage, 'attempt': attempt}, attempt=attempt)
+        else:
+            add_event(
+                job_id,
+                'job.superseded',
+                {'stage': exc.stage, 'attempt': attempt, 'reason': exc.reason},
+                attempt=attempt,
+            )
     except AutomationFailure as exc:
+        _guard_active_attempt(job_id, attempt, exc.stage)
         if exc.screen:
-            replace_spool_sections(job_id, split_spool(exc.screen))
+            replace_spool_sections(job_id, split_spool(exc.screen), attempt=attempt)
         update_job(
             job_id,
             state='failed',
@@ -80,8 +119,14 @@ def run_job(job: dict) -> None:
             stage=exc.stage,
             finished_at=_utcnow(),
         )
-        add_event(job_id, 'job.error', {'stage': exc.stage, 'detail': exc.detail, 'screen': exc.screen})
+        add_event(
+            job_id,
+            'job.error',
+            {'stage': exc.stage, 'detail': exc.detail, 'screen': exc.screen, 'attempt': attempt},
+            attempt=attempt,
+        )
     except Exception as exc:
+        _guard_active_attempt(job_id, attempt, 'unexpected')
         update_job(
             job_id,
             state='failed',
@@ -90,12 +135,14 @@ def run_job(job: dict) -> None:
             stage='unexpected',
             finished_at=_utcnow(),
         )
-        add_event(job_id, 'job.error', {'stage': 'unexpected', 'detail': str(exc)})
+        add_event(job_id, 'job.error', {'stage': 'unexpected', 'detail': str(exc), 'attempt': attempt}, attempt=attempt)
 
 
-def _run_dry(job_id: str, job_name: str, params: dict) -> None:
-    add_event(job_id, 'job.state', {'state': 'submitted'})
+def _run_dry(job_id: str, attempt: int, job_name: str, params: dict) -> None:
+    _guard_active_attempt(job_id, attempt, 'submitted')
+    add_event(job_id, 'job.state', {'state': 'submitted', 'attempt': attempt}, attempt=attempt)
     time.sleep(1)
+    _guard_active_attempt(job_id, attempt, 'waiting_for_completion')
     raw_spool = f"""IEF236I ALLOC. FOR {job_name} STEP1
 IEF142I {job_name} STEP1 - STEP WAS EXECUTED - COND CODE 0000
 //{job_name:<8} JOB ,'WEB JOB',CLASS=A,MSGCLASS=H,MSGLEVEL=(1,1)
@@ -108,7 +155,8 @@ IEF142I {job_name} STEP1 - STEP WAS EXECUTED - COND CODE 0000
 //SYSIN    DD DUMMY
 HELLO FROM DRY RUN
 """
-    replace_spool_sections(job_id, split_spool(raw_spool))
+    _guard_active_attempt(job_id, attempt, 'reading_spool')
+    replace_spool_sections(job_id, split_spool(raw_spool), attempt=attempt)
     update_job(
         job_id,
         state='completed',
@@ -118,7 +166,12 @@ HELLO FROM DRY RUN
         stage='done',
         finished_at=_utcnow(),
     )
-    add_event(job_id, 'job.result', {'result': 'success', 'mainframe_job_id': 'JOB00001', 'return_code': '0000'})
+    add_event(
+        job_id,
+        'job.result',
+        {'result': 'success', 'mainframe_job_id': 'JOB00001', 'return_code': '0000', 'attempt': attempt},
+        attempt=attempt,
+    )
 
 
 def _capture(client: S3270Client, settle: float = 0.25) -> str:
@@ -262,18 +315,23 @@ def _read_output(client: S3270Client, job_name: str, mainframe_job_id: str) -> s
     return '\n\n----- SCREEN -----\n\n'.join(chunks)
 
 
-def _run_real(job_id: str, job_name: str, jcl: str) -> dict[str, str | None]:
-    add_event(job_id, 'job.state', {'state': 'logging_in'})
+def _run_real(job_id: str, attempt: int, job_name: str, jcl: str) -> dict[str, str | None]:
+    _guard_active_attempt(job_id, attempt, 'logging_in')
+    add_event(job_id, 'job.state', {'state': 'logging_in', 'attempt': attempt}, attempt=attempt)
     with S3270Client() as client:
         login_screen = _logon(client)
-        add_event(job_id, 'job.screen', {'stage': 'logging_in', 'preview': login_screen[:600]})
-        add_event(job_id, 'job.state', {'state': 'writing_jcl'})
+        _guard_active_attempt(job_id, attempt, 'logging_in')
+        add_event(job_id, 'job.screen', {'stage': 'logging_in', 'preview': login_screen[:600], 'attempt': attempt}, attempt=attempt)
+        _guard_active_attempt(job_id, attempt, 'writing_jcl')
+        add_event(job_id, 'job.state', {'state': 'writing_jcl', 'attempt': attempt}, attempt=attempt)
         submit_text = _submit_jcl_via_edit(client, job_name, jcl)
         mainframe_job_id = extract_job_id(submit_text)
-        add_event(job_id, 'job.mainframe_id', {'value': mainframe_job_id})
-        add_event(job_id, 'job.state', {'state': 'waiting_for_completion'})
+        add_event(job_id, 'job.mainframe_id', {'value': mainframe_job_id, 'attempt': attempt}, attempt=attempt)
+        _guard_active_attempt(job_id, attempt, 'waiting_for_completion')
+        add_event(job_id, 'job.state', {'state': 'waiting_for_completion', 'attempt': attempt}, attempt=attempt)
         status_text = _poll_job(client, job_name, mainframe_job_id)
-        add_event(job_id, 'job.state', {'state': 'reading_spool'})
+        _guard_active_attempt(job_id, attempt, 'reading_spool')
+        add_event(job_id, 'job.state', {'state': 'reading_spool', 'attempt': attempt}, attempt=attempt)
         spool_text = _read_output(client, job_name, mainframe_job_id)
         raw_spool = status_text + '\n\n' + submit_text + '\n\n' + spool_text
         result = 'success'

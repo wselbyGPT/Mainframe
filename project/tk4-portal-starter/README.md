@@ -9,6 +9,10 @@ This starter bundle exposes a small FastAPI API plus a polling worker that can e
 
 - `GET /api/templates` to discover available JCL templates and parameter specs
 - `POST /api/jobs` to queue a template-driven JCL job
+- lifecycle endpoints:
+  - `POST /api/jobs/{job_id}/cancel`
+  - `POST /api/jobs/{job_id}/retry`
+  - `POST /api/jobs/{job_id}/requeue`
 - worker polling loop
 - SQLite job store
 - `s3270` subprocess wrapper
@@ -318,6 +322,77 @@ You can consume incremental job events with:
 ### Curl example
 
 ```bash
+
+## Job lifecycle and transition contracts
+
+The API enforces explicit state transitions and returns deterministic errors:
+
+- `404` (`code=job_not_found`) when `{job_id}` does not exist.
+- `409` (`code=invalid_transition`) when the transition is not allowed from the current state.
+
+### Transition rules
+
+- **cancel** (`POST /api/jobs/{job_id}/cancel`)
+  - allowed from: `queued`, `starting`, `submitted`, `running`, `logging_in`, `writing_jcl`, `waiting_for_completion`, `reading_spool`
+  - result: `state=canceled`, `result=canceled`
+- **retry** (`POST /api/jobs/{job_id}/retry`)
+  - allowed from failed terminal runs (`state=failed` or failure result such as `error`, `jcl_error`, `abend`)
+  - result: same `job_id`, new `attempt`, state reset to `queued`
+- **requeue** (`POST /api/jobs/{job_id}/requeue`)
+  - allowed from: `failed`, `canceled`, and non-terminal stuck states
+  - rejected from: `completed` (unless clone semantics are introduced later)
+  - result: same `job_id`, new `attempt`, state reset to `queued`
+
+### Attempt / provenance model
+
+- The system uses a **same job ID, incrementing attempt** model.
+- `jobs.attempt` increments on `retry`/`requeue`.
+- Provenance fields are preserved across attempts:
+  - `template_id`, `submitted_by`, `input_params_json`
+- Execution fields are reset for each new attempt:
+  - `started_at`, `finished_at`, `mainframe_job_id`, `return_code`, `abend_code`, `error_text`, `stage`
+- `spool_sections` and `job_events` are stored with `attempt`, so prior attempts remain auditable.
+
+### State diagram (high-level)
+
+```text
+queued -> starting -> logging_in -> writing_jcl -> waiting_for_completion -> reading_spool -> completed|failed
+   |                          |                                                |
+   +--------------------------+------------------------------ cancel ----------> canceled
+
+failed --retry--> queued (attempt+1)
+failed|canceled|stuck_non_terminal --requeue--> queued (attempt+1)
+completed --requeue--> 409 invalid_transition
+```
+
+### Lifecycle response payload (example)
+
+```json
+{
+  "id": "a66ef4f7-1d50-47a3-b0e8-2a1f56af2df7",
+  "state": "queued",
+  "attempt": 2,
+  "attempt_info": {
+    "attempt": 2,
+    "parent_job_id": "a66ef4f7-1d50-47a3-b0e8-2a1f56af2df7",
+    "retry_of_job_id": "a66ef4f7-1d50-47a3-b0e8-2a1f56af2df7"
+  },
+  "event_summary": {
+    "count": 1,
+    "last_event": "job.retried"
+  },
+  "events": [
+    {
+      "event_type": "job.retried",
+      "payload": {
+        "state": "queued",
+        "attempt": 2,
+        "previous_attempt": 1
+      }
+    }
+  ]
+}
+```
 curl -N http://localhost:8080/api/jobs/<job-id>/events/stream
 ```
 
