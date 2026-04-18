@@ -9,6 +9,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from common.db import (
+    JobTransitionError,
+    cancel_job,
     create_job,
     get_job,
     get_job_events,
@@ -16,6 +18,8 @@ from common.db import (
     get_spool_sections,
     init_db,
     list_jobs,
+    requeue_job,
+    retry_job,
 )
 from common.template_schemas import (
     TemplateSchemaError,
@@ -31,7 +35,7 @@ _SSE_POLL_SECONDS = 1.0
 _SSE_KEEPALIVE_SECONDS = 15.0
 _SSE_MAX_BATCH_SIZE = 100
 _SSE_BACKLOG_LIMIT = 200
-_TERMINAL_STATES = {'completed', 'failed'}
+_TERMINAL_STATES = {'completed', 'failed', 'canceled'}
 
 
 class CreateJobRequest(BaseModel):
@@ -65,7 +69,7 @@ def template_details(template_id: str) -> dict[str, Any]:
 
 @app.get('/api/jobs')
 def jobs() -> list[dict[str, Any]]:
-    return list_jobs()
+    return [_build_job_payload(job) for job in list_jobs()]
 
 
 @app.post('/api/jobs')
@@ -74,23 +78,22 @@ def create_job_route(request: CreateJobRequest) -> dict[str, Any]:
         normalized_params = normalize_and_validate_template_params(request.template_id, request.params)
     except TemplateSchemaError as exc:
         raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
-    return create_job(request.template_id, request.submitted_by, normalized_params)
+    return _build_job_payload(create_job(request.template_id, request.submitted_by, normalized_params))
 
 
 @app.get('/api/jobs/{job_id}')
 def get_job_route(job_id: str) -> dict[str, Any]:
     job = get_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail='Job not found')
-    job['events'] = get_job_events(job_id)
-    return job
+        raise HTTPException(status_code=404, detail={'code': 'job_not_found', 'message': 'Job not found'})
+    return _build_job_payload(job)
 
 
 @app.get('/api/jobs/{job_id}/spool')
 def get_spool_route(job_id: str) -> dict[str, Any]:
     job = get_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail='Job not found')
+        raise HTTPException(status_code=404, detail={'code': 'job_not_found', 'message': 'Job not found'})
     return {'job_id': job_id, 'sections': get_spool_sections(job_id)}
 
 
@@ -98,11 +101,52 @@ def get_spool_route(job_id: str) -> dict[str, Any]:
 def get_spool_section_route(job_id: str, section_type: str) -> dict[str, Any]:
     job = get_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail='Job not found')
+        raise HTTPException(status_code=404, detail={'code': 'job_not_found', 'message': 'Job not found'})
     sections = [s for s in get_spool_sections(job_id) if s['section_type'] == section_type]
     if not sections:
         raise HTTPException(status_code=404, detail='Spool section not found')
     return {'job_id': job_id, 'section_type': section_type, 'content': '\n\n'.join(s['content_text'] for s in sections)}
+
+
+def _build_job_payload(job: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(job)
+    events = get_job_events(job['id'])
+    payload['events'] = events
+    payload['event_summary'] = {
+        'count': len(events),
+        'last_event': events[-1]['event_type'] if events else None,
+    }
+    payload['attempt_info'] = {
+        'attempt': payload.get('attempt', 1),
+        'parent_job_id': payload.get('parent_job_id'),
+        'retry_of_job_id': payload.get('retry_of_job_id'),
+    }
+    return payload
+
+
+def _apply_transition(job_id: str, transition_fn: Any) -> dict[str, Any]:
+    try:
+        job = transition_fn(job_id)
+    except JobTransitionError as exc:
+        raise HTTPException(status_code=409, detail=exc.to_dict()) from exc
+    if not job:
+        raise HTTPException(status_code=404, detail={'code': 'job_not_found', 'message': 'Job not found'})
+    return _build_job_payload(job)
+
+
+@app.post('/api/jobs/{job_id}/cancel')
+def cancel_job_route(job_id: str) -> dict[str, Any]:
+    return _apply_transition(job_id, cancel_job)
+
+
+@app.post('/api/jobs/{job_id}/retry')
+def retry_job_route(job_id: str) -> dict[str, Any]:
+    return _apply_transition(job_id, retry_job)
+
+
+@app.post('/api/jobs/{job_id}/requeue')
+def requeue_job_route(job_id: str) -> dict[str, Any]:
+    return _apply_transition(job_id, requeue_job)
 
 
 def _to_sse_frame(event_id: int, event_type: str, payload: dict[str, Any]) -> str:
@@ -119,7 +163,7 @@ async def stream_job_events_route(
 ) -> StreamingResponse:
     job = get_job(job_id)
     if not job:
-        raise HTTPException(status_code=404, detail='Job not found')
+        raise HTTPException(status_code=404, detail={'code': 'job_not_found', 'message': 'Job not found'})
 
     try:
         cursor = int(last_event_id) if last_event_id else 0

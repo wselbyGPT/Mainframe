@@ -11,6 +11,32 @@ from typing import Any
 from common.config import settings
 
 _LOCK = threading.Lock()
+_CANCELABLE_STATES = {
+    'queued',
+    'starting',
+    'submitted',
+    'running',
+    'logging_in',
+    'writing_jcl',
+    'waiting_for_completion',
+    'reading_spool',
+}
+_REQUEUEABLE_STATES = _CANCELABLE_STATES | {'failed', 'canceled'}
+_FAILURE_RESULTS = {'error', 'failed', 'jcl_error', 'abend'}
+
+
+class JobTransitionError(RuntimeError):
+    def __init__(self, code: str, message: str, state: str | None = None):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.state = state
+
+    def to_dict(self) -> dict[str, Any]:
+        detail: dict[str, Any] = {'code': self.code, 'message': self.message}
+        if self.state is not None:
+            detail['state'] = self.state
+        return detail
 
 
 def _utcnow() -> str:
@@ -24,6 +50,11 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    rows = conn.execute(f'PRAGMA table_info({table})').fetchall()
+    return any(row['name'] == column for row in rows)
+
+
 def init_db() -> None:
     with _LOCK:
         conn = connect()
@@ -35,6 +66,9 @@ def init_db() -> None:
                     template_id TEXT NOT NULL,
                     submitted_by TEXT NOT NULL,
                     input_params_json TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    parent_job_id TEXT,
+                    retry_of_job_id TEXT,
                     state TEXT NOT NULL,
                     result TEXT,
                     job_name TEXT,
@@ -52,6 +86,7 @@ def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS spool_sections (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
                     section_type TEXT NOT NULL,
                     ordinal INTEGER NOT NULL,
                     content_text TEXT NOT NULL,
@@ -61,6 +96,7 @@ def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS job_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     job_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,
                     ts TEXT NOT NULL,
                     event_type TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
@@ -68,6 +104,16 @@ def init_db() -> None:
                 );
                 """
             )
+            if not _table_has_column(conn, 'jobs', 'attempt'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1')
+            if not _table_has_column(conn, 'jobs', 'parent_job_id'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN parent_job_id TEXT')
+            if not _table_has_column(conn, 'jobs', 'retry_of_job_id'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN retry_of_job_id TEXT')
+            if not _table_has_column(conn, 'spool_sections', 'attempt'):
+                conn.execute('ALTER TABLE spool_sections ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1')
+            if not _table_has_column(conn, 'job_events', 'attempt'):
+                conn.execute('ALTER TABLE job_events ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1')
             conn.commit()
         finally:
             conn.close()
@@ -82,16 +128,16 @@ def create_job(template_id: str, submitted_by: str, params: dict[str, Any]) -> d
             conn.execute(
                 """
                 INSERT INTO jobs (
-                    id, template_id, submitted_by, input_params_json, state,
+                    id, template_id, submitted_by, input_params_json, attempt, parent_job_id, state,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job_id, template_id, submitted_by, json.dumps(params), 'queued', now, now),
+                (job_id, template_id, submitted_by, json.dumps(params), 1, job_id, 'queued', now, now),
             )
             conn.commit()
         finally:
             conn.close()
-    add_event(job_id, 'job.created', {'state': 'queued'})
+    add_event(job_id, 'job.created', {'state': 'queued', 'attempt': 1}, attempt=1)
     return get_job(job_id)
 
 
@@ -111,27 +157,35 @@ def update_job(job_id: str, **fields: Any) -> None:
             conn.close()
 
 
-def add_event(job_id: str, event_type: str, payload: dict[str, Any]) -> None:
+def add_event(job_id: str, event_type: str, payload: dict[str, Any], attempt: int | None = None) -> None:
     with _LOCK:
         conn = connect()
         try:
+            event_attempt = attempt
+            if event_attempt is None:
+                row = conn.execute('SELECT attempt FROM jobs WHERE id = ?', (job_id,)).fetchone()
+                event_attempt = int(row['attempt']) if row else 1
             conn.execute(
-                'INSERT INTO job_events (job_id, ts, event_type, payload_json) VALUES (?, ?, ?, ?)',
-                (job_id, _utcnow(), event_type, json.dumps(payload)),
+                'INSERT INTO job_events (job_id, attempt, ts, event_type, payload_json) VALUES (?, ?, ?, ?, ?)',
+                (job_id, int(event_attempt), _utcnow(), event_type, json.dumps(payload)),
             )
             conn.commit()
         finally:
             conn.close()
 
 
-def replace_spool_sections(job_id: str, sections: list[dict[str, Any]]) -> None:
+def replace_spool_sections(job_id: str, sections: list[dict[str, Any]], attempt: int | None = None) -> None:
     with _LOCK:
         conn = connect()
         try:
-            conn.execute('DELETE FROM spool_sections WHERE job_id = ?', (job_id,))
+            spool_attempt = attempt
+            if spool_attempt is None:
+                row = conn.execute('SELECT attempt FROM jobs WHERE id = ?', (job_id,)).fetchone()
+                spool_attempt = int(row['attempt']) if row else 1
+            conn.execute('DELETE FROM spool_sections WHERE job_id = ? AND attempt = ?', (job_id, int(spool_attempt)))
             conn.executemany(
-                'INSERT INTO spool_sections (job_id, section_type, ordinal, content_text) VALUES (?, ?, ?, ?)',
-                [(job_id, s['section_type'], s['ordinal'], s['content_text']) for s in sections],
+                'INSERT INTO spool_sections (job_id, attempt, section_type, ordinal, content_text) VALUES (?, ?, ?, ?, ?)',
+                [(job_id, int(spool_attempt), s['section_type'], s['ordinal'], s['content_text']) for s in sections],
             )
             conn.commit()
         finally:
@@ -180,9 +234,17 @@ def next_queued_job() -> dict[str, Any] | None:
 def get_spool_sections(job_id: str) -> list[dict[str, Any]]:
     conn = connect()
     try:
+        job = conn.execute('SELECT attempt FROM jobs WHERE id = ?', (job_id,)).fetchone()
+        if not job:
+            return []
         rows = conn.execute(
-            'SELECT section_type, ordinal, content_text FROM spool_sections WHERE job_id = ? ORDER BY ordinal ASC',
-            (job_id,),
+            """
+            SELECT attempt, section_type, ordinal, content_text
+            FROM spool_sections
+            WHERE job_id = ? AND attempt = ?
+            ORDER BY ordinal ASC
+            """,
+            (job_id, int(job['attempt'])),
         ).fetchall()
         return [dict(row) for row in rows]
     finally:
@@ -192,9 +254,17 @@ def get_spool_sections(job_id: str) -> list[dict[str, Any]]:
 def get_job_events(job_id: str) -> list[dict[str, Any]]:
     conn = connect()
     try:
+        job = conn.execute('SELECT attempt FROM jobs WHERE id = ?', (job_id,)).fetchone()
+        if not job:
+            return []
         rows = conn.execute(
-            'SELECT ts, event_type, payload_json FROM job_events WHERE job_id = ? ORDER BY id ASC',
-            (job_id,),
+            """
+            SELECT id, attempt, ts, event_type, payload_json
+            FROM job_events
+            WHERE job_id = ? AND attempt = ?
+            ORDER BY id ASC
+            """,
+            (job_id, int(job['attempt'])),
         ).fetchall()
         out = []
         for row in rows:
@@ -211,15 +281,18 @@ def get_job_events_since(job_id: str, after_id: int = 0, limit: int = 100) -> li
     safe_limit = max(1, min(int(limit), 500))
     conn = connect()
     try:
+        job = conn.execute('SELECT attempt FROM jobs WHERE id = ?', (job_id,)).fetchone()
+        if not job:
+            return []
         rows = conn.execute(
             """
-            SELECT id, ts, event_type, payload_json
+            SELECT id, attempt, ts, event_type, payload_json
             FROM job_events
-            WHERE job_id = ? AND id > ?
+            WHERE job_id = ? AND attempt = ? AND id > ?
             ORDER BY id ASC
             LIMIT ?
             """,
-            (job_id, safe_after_id, safe_limit),
+            (job_id, int(job['attempt']), safe_after_id, safe_limit),
         ).fetchall()
         out = []
         for row in rows:
@@ -229,3 +302,149 @@ def get_job_events_since(job_id: str, after_id: int = 0, limit: int = 100) -> li
         return out
     finally:
         conn.close()
+
+
+def _insert_event_locked(
+    conn: sqlite3.Connection, job_id: str, attempt: int, event_type: str, payload: dict[str, Any]
+) -> None:
+    conn.execute(
+        'INSERT INTO job_events (job_id, attempt, ts, event_type, payload_json) VALUES (?, ?, ?, ?, ?)',
+        (job_id, int(attempt), _utcnow(), event_type, json.dumps(payload)),
+    )
+
+
+def cancel_job(job_id: str) -> dict[str, Any] | None:
+    with _LOCK:
+        conn = connect()
+        try:
+            row = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            if not row:
+                return None
+            job = dict(row)
+            state = job['state']
+            if state not in _CANCELABLE_STATES:
+                raise JobTransitionError(
+                    code='invalid_transition',
+                    message=f"Cannot cancel job from state '{state}'",
+                    state=state,
+                )
+            now = _utcnow()
+            conn.execute(
+                """
+                UPDATE jobs
+                SET state = ?, result = ?, stage = ?, finished_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                ('canceled', 'canceled', 'canceled', now, now, job_id),
+            )
+            _insert_event_locked(
+                conn,
+                job_id,
+                int(job['attempt']),
+                'job.canceled',
+                {'from_state': state, 'state': 'canceled', 'attempt': int(job['attempt'])},
+            )
+            conn.commit()
+            fresh = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            return dict(fresh) if fresh else None
+        finally:
+            conn.close()
+
+
+def retry_job(job_id: str) -> dict[str, Any] | None:
+    with _LOCK:
+        conn = connect()
+        try:
+            row = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            if not row:
+                return None
+            job = dict(row)
+            state = job['state']
+            result = job['result']
+            if state != 'failed' and result not in _FAILURE_RESULTS:
+                raise JobTransitionError(
+                    code='invalid_transition',
+                    message=f"Cannot retry job from state '{state}' with result '{result}'",
+                    state=state,
+                )
+            next_attempt = int(job.get('attempt') or 1) + 1
+            now = _utcnow()
+            conn.execute(
+                """
+                UPDATE jobs
+                SET attempt = ?, state = ?, result = NULL, mainframe_job_id = NULL, return_code = NULL,
+                    abend_code = NULL, error_text = NULL, stage = NULL, started_at = NULL, finished_at = NULL,
+                    updated_at = ?, retry_of_job_id = ?
+                WHERE id = ?
+                """,
+                (next_attempt, 'queued', now, job_id, job_id),
+            )
+            _insert_event_locked(
+                conn,
+                job_id,
+                next_attempt,
+                'job.retried',
+                {
+                    'state': 'queued',
+                    'attempt': next_attempt,
+                    'retry_of_job_id': job_id,
+                    'previous_attempt': int(job.get('attempt') or 1),
+                },
+            )
+            conn.commit()
+            fresh = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            return dict(fresh) if fresh else None
+        finally:
+            conn.close()
+
+
+def requeue_job(job_id: str) -> dict[str, Any] | None:
+    with _LOCK:
+        conn = connect()
+        try:
+            row = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            if not row:
+                return None
+            job = dict(row)
+            state = job['state']
+            if state == 'completed':
+                raise JobTransitionError(
+                    code='invalid_transition',
+                    message="Cannot requeue a completed job without clone semantics",
+                    state=state,
+                )
+            if state not in _REQUEUEABLE_STATES:
+                raise JobTransitionError(
+                    code='invalid_transition',
+                    message=f"Cannot requeue job from state '{state}'",
+                    state=state,
+                )
+            next_attempt = int(job.get('attempt') or 1) + 1
+            now = _utcnow()
+            conn.execute(
+                """
+                UPDATE jobs
+                SET attempt = ?, state = ?, result = NULL, mainframe_job_id = NULL, return_code = NULL,
+                    abend_code = NULL, error_text = NULL, stage = NULL, started_at = NULL, finished_at = NULL,
+                    updated_at = ?, retry_of_job_id = NULL
+                WHERE id = ?
+                """,
+                (next_attempt, 'queued', now, job_id),
+            )
+            _insert_event_locked(
+                conn,
+                job_id,
+                next_attempt,
+                'job.requeued',
+                {
+                    'state': 'queued',
+                    'attempt': next_attempt,
+                    'previous_attempt': int(job.get('attempt') or 1),
+                    'from_state': state,
+                },
+            )
+            conn.commit()
+            fresh = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            return dict(fresh) if fresh else None
+        finally:
+            conn.close()
