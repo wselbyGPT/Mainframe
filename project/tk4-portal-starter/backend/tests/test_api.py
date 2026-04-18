@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +36,15 @@ class TemplateApiTests(unittest.TestCase):
         payload = response.json()
         template_ids = {item['template_id'] for item in payload['templates']}
         self.assertEqual(template_ids, {'hello-world', 'idcams-listcat', 'iebgener-copy', 'sort-basic'})
+        hello_world = next(item for item in payload['templates'] if item['template_id'] == 'hello-world')
+        self.assertEqual(hello_world['params']['job_name']['default'], 'HELLO1')
+
+    def test_get_template_details(self) -> None:
+        response = self.client.get('/api/templates/hello-world')
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['template_id'], 'hello-world')
+        self.assertIn('message', payload['params'])
 
     def test_post_jobs_rejects_unknown_template(self) -> None:
         response = self.client.post(
@@ -42,14 +52,45 @@ class TemplateApiTests(unittest.TestCase):
             json={'template_id': 'does-not-exist', 'submitted_by': 'tester', 'params': {}},
         )
         self.assertEqual(response.status_code, 422)
-        self.assertIn('Unknown template_id', response.json()['detail'])
+        detail = response.json()['detail']
+        self.assertEqual(detail['code'], 'unknown_template_id')
+        self.assertEqual(detail['errors'][0]['path'], 'template_id')
 
-    def test_post_jobs_keeps_defaults(self) -> None:
+    def test_post_jobs_validation_422_structure(self) -> None:
+        response = self.client.post(
+            '/api/jobs',
+            json={'template_id': 'idcams-listcat', 'submitted_by': 'tester', 'params': {'job_name': 'listcat'}},
+        )
+        self.assertEqual(response.status_code, 422)
+        detail = response.json()['detail']
+        self.assertEqual(detail['code'], 'template_params_invalid')
+        self.assertEqual(detail['errors'][0]['path'], 'params.level')
+        self.assertEqual(detail['errors'][0]['reason'], 'missing_required_field')
+
+    def test_post_jobs_persists_normalized_params(self) -> None:
+        response = self.client.post(
+            '/api/jobs',
+            json={
+                'template_id': 'hello-world',
+                'submitted_by': 'tester',
+                'params': {'job_name': 'hello9999', 'message': '  hello client  '},
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        stored = json.loads(payload['input_params_json'])
+        self.assertEqual(stored['job_name'], 'HELLO999')
+        self.assertEqual(stored['message'], 'hello client')
+
+    def test_post_jobs_hello_world_defaults_regression(self) -> None:
         response = self.client.post('/api/jobs', json={'params': {'message': 'DEFAULT FLOW'}})
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload['template_id'], 'hello-world')
         self.assertEqual(payload['submitted_by'], 'anonymous')
+        stored = json.loads(payload['input_params_json'])
+        self.assertEqual(stored['job_name'], 'HELLO1')
+        self.assertEqual(stored['message'], 'DEFAULT FLOW')
 
 
 if __name__ == '__main__':

@@ -44,6 +44,70 @@ Current templates:
 - must start with `A-Z`
 - remaining characters may be `A-Z`, `0-9`, `#`, `$`, `@`
 
+
+## Template contracts and schemas
+
+Use:
+
+- `GET /api/templates` for all templates and their parameter contracts
+- `GET /api/templates/{template_id}` for one template
+
+Each parameter includes:
+
+- `type`
+- `required`
+- `default` (when optional)
+- `help`
+- `examples`
+- `format` (when applicable, such as `jcl_job_name`)
+
+Normalization is applied before enqueue and persisted to `jobs.input_params_json`:
+
+- all string params are trimmed
+- `job_name` is uppercased and truncated to 8 chars, then validated against `^[A-Z][A-Z0-9#$@]{0,7}$`
+- optional params receive schema defaults
+
+### Validation error format (`422`)
+
+`POST /api/jobs` returns structured details:
+
+```json
+{
+  "detail": {
+    "code": "template_params_invalid",
+    "message": "Template parameters failed validation",
+    "errors": [
+      {
+        "path": "params.level",
+        "reason": "missing_required_field",
+        "expected": {"type": "string"}
+      }
+    ]
+  }
+}
+```
+
+Unknown template IDs return:
+
+```json
+{
+  "detail": {
+    "code": "unknown_template_id",
+    "message": "Unknown template_id 'does-not-exist'",
+    "errors": [
+      {
+        "path": "template_id",
+        "reason": "unsupported_value",
+        "expected": {
+          "one_of": ["hello-world", "idcams-listcat", "iebgener-copy", "sort-basic"]
+        },
+        "actual": "does-not-exist"
+      }
+    ]
+  }
+}
+```
+
 ## Important limitations
 
 This bundle was not live-tested against your specific TK4 image. The real worker path is designed to fail with a very explicit stage name and captured screen text if the host presents a different logon screen or command flow than expected.
@@ -79,6 +143,8 @@ curl http://localhost:8080/api/templates
 
 ### `hello-world`
 
+Valid:
+
 ```bash
 curl -X POST http://localhost:8080/api/jobs \
   -H 'Content-Type: application/json' \
@@ -92,7 +158,24 @@ curl -X POST http://localhost:8080/api/jobs \
   }'
 ```
 
+Invalid (bad `job_name` format):
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "template_id": "hello-world",
+    "submitted_by": "william",
+    "params": {
+      "job_name": "1BAD",
+      "message": "HELLO"
+    }
+  }'
+```
+
 ### `idcams-listcat`
+
+Valid:
 
 ```bash
 curl -X POST http://localhost:8080/api/jobs \
@@ -107,7 +190,23 @@ curl -X POST http://localhost:8080/api/jobs \
   }'
 ```
 
+Invalid (missing required `level`):
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "template_id": "idcams-listcat",
+    "submitted_by": "william",
+    "params": {
+      "job_name": "LISTCAT"
+    }
+  }'
+```
+
 ### `iebgener-copy`
+
+Valid:
 
 ```bash
 curl -X POST http://localhost:8080/api/jobs \
@@ -123,7 +222,24 @@ curl -X POST http://localhost:8080/api/jobs \
   }'
 ```
 
+Invalid (missing `output_dataset`):
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "template_id": "iebgener-copy",
+    "submitted_by": "william",
+    "params": {
+      "job_name": "COPYJOB",
+      "input_dataset": "SYS1.PROCLIB"
+    }
+  }'
+```
+
 ### `sort-basic`
+
+Valid:
 
 ```bash
 curl -X POST http://localhost:8080/api/jobs \
@@ -136,6 +252,23 @@ curl -X POST http://localhost:8080/api/jobs \
       "input_dataset": "IBMUSER.INPUT",
       "output_dataset": "IBMUSER.OUTPUT",
       "sort_fields": "1,8,CH,A"
+    }
+  }'
+```
+
+Invalid (wrong type for `sort_fields`):
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "template_id": "sort-basic",
+    "submitted_by": "william",
+    "params": {
+      "job_name": "SORTJOB",
+      "input_dataset": "IBMUSER.INPUT",
+      "output_dataset": "IBMUSER.OUTPUT",
+      "sort_fields": 123
     }
   }'
 ```

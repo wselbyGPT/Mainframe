@@ -45,7 +45,7 @@ def _utcnow() -> str:
 def run_job(job: dict) -> None:
     job_id = job['id']
     params = json.loads(job['input_params_json'])
-    job_name = str(params.get('job_name', 'HELLO1')).upper()[:8]
+    job_name = params['job_name']
     update_job(job_id, job_name=job_name)
     add_event(job_id, 'job.state', {'state': 'starting'})
 
@@ -101,7 +101,7 @@ IEF142I {job_name} STEP1 - STEP WAS EXECUTED - COND CODE 0000
 //{job_name:<8} JOB ,'WEB JOB',CLASS=A,MSGCLASS=H,MSGLEVEL=(1,1)
 //STEP1    EXEC PGM=IEBGENER
 //SYSUT1   DD *
-{params.get('message', 'HELLO FROM WEB PORTAL')}
+{params['message']}
 /*
 //SYSUT2   DD SYSOUT=H
 //SYSPRINT DD SYSOUT=H

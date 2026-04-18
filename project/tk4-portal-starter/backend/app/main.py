@@ -17,7 +17,13 @@ from common.db import (
     init_db,
     list_jobs,
 )
-from common.templates import TemplateValidationError, get_template_catalog, validate_template_params
+from common.template_schemas import (
+    TemplateSchemaError,
+    UnknownTemplateError,
+    get_template_catalog,
+    get_template_schema,
+    normalize_and_validate_template_params,
+)
 
 app = FastAPI(title='TK4 Portal')
 
@@ -49,6 +55,14 @@ def templates_catalog() -> dict[str, Any]:
     return {'templates': get_template_catalog()}
 
 
+@app.get('/api/templates/{template_id}')
+def template_details(template_id: str) -> dict[str, Any]:
+    try:
+        return get_template_schema(template_id)
+    except UnknownTemplateError as exc:
+        raise HTTPException(status_code=404, detail=exc.to_dict()) from exc
+
+
 @app.get('/api/jobs')
 def jobs() -> list[dict[str, Any]]:
     return list_jobs()
@@ -57,10 +71,10 @@ def jobs() -> list[dict[str, Any]]:
 @app.post('/api/jobs')
 def create_job_route(request: CreateJobRequest) -> dict[str, Any]:
     try:
-        validate_template_params(request.template_id, request.params)
-    except TemplateValidationError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return create_job(request.template_id, request.submitted_by, request.params)
+        normalized_params = normalize_and_validate_template_params(request.template_id, request.params)
+    except TemplateSchemaError as exc:
+        raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
+    return create_job(request.template_id, request.submitted_by, normalized_params)
 
 
 @app.get('/api/jobs/{job_id}')
