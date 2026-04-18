@@ -204,3 +204,28 @@ def get_job_events(job_id: str) -> list[dict[str, Any]]:
         return out
     finally:
         conn.close()
+
+
+def get_job_events_since(job_id: str, after_id: int = 0, limit: int = 100) -> list[dict[str, Any]]:
+    safe_after_id = max(0, int(after_id))
+    safe_limit = max(1, min(int(limit), 500))
+    conn = connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, ts, event_type, payload_json
+            FROM job_events
+            WHERE job_id = ? AND id > ?
+            ORDER BY id ASC
+            LIMIT ?
+            """,
+            (job_id, safe_after_id, safe_limit),
+        ).fetchall()
+        out = []
+        for row in rows:
+            item = dict(row)
+            item['payload'] = json.loads(item.pop('payload_json'))
+            out.append(item)
+        return out
+    finally:
+        conn.close()
