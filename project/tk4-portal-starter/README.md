@@ -163,3 +163,52 @@ curl http://localhost:8080/api/jobs
 curl http://localhost:8080/api/jobs/<job-id>
 curl http://localhost:8080/api/jobs/<job-id>/spool/raw
 ```
+
+## Server-Sent Events (SSE) job event stream
+
+You can consume incremental job events with:
+
+- `GET /api/jobs/{job_id}/events/stream`
+- response type: `text/event-stream`
+- SSE frame shape:
+  - `id: <monotonic event id>`
+  - `event: <event type>`
+  - `data: <JSON payload>`
+
+### Stream semantics
+
+- The stream sends historical backlog first (bounded window), then tails new events.
+- Keepalive comments (`: ping`) are emitted periodically for idle connections.
+- The stream remains open until a terminal job state is observed (`completed` or `failed`) and a final flush/linger period elapses.
+- Unknown jobs return `404` without opening a stream.
+
+### Curl example
+
+```bash
+curl -N http://localhost:8080/api/jobs/<job-id>/events/stream
+```
+
+### Browser example
+
+```html
+<script>
+  const source = new EventSource("http://localhost:8080/api/jobs/<job-id>/events/stream");
+  source.onmessage = (evt) => console.log("message", evt.lastEventId, evt.data);
+  source.addEventListener("job.completed", (evt) => {
+    console.log("completed", evt.lastEventId, JSON.parse(evt.data));
+    source.close();
+  });
+</script>
+```
+
+### Reconnection with `Last-Event-ID`
+
+When reconnecting manually (for non-browser clients), send the last seen SSE event id:
+
+```bash
+curl -N \
+  -H "Last-Event-ID: 42" \
+  http://localhost:8080/api/jobs/<job-id>/events/stream
+```
+
+The server resumes with events where `id > 42`, preventing duplicate delivery during reconnect.
