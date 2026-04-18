@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from common.db import create_job, get_job, get_job_events, get_spool_sections, init_db, list_jobs
+from common.templates import TemplateValidationError, get_template_catalog, validate_template_params
 
 app = FastAPI(title='TK4 Portal')
 
@@ -26,6 +27,11 @@ def healthz() -> dict[str, str]:
     return {'status': 'ok'}
 
 
+@app.get('/api/templates')
+def templates_catalog() -> dict[str, Any]:
+    return {'templates': get_template_catalog()}
+
+
 @app.get('/api/jobs')
 def jobs() -> list[dict[str, Any]]:
     return list_jobs()
@@ -33,6 +39,10 @@ def jobs() -> list[dict[str, Any]]:
 
 @app.post('/api/jobs')
 def create_job_route(request: CreateJobRequest) -> dict[str, Any]:
+    try:
+        validate_template_params(request.template_id, request.params)
+    except TemplateValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return create_job(request.template_id, request.submitted_by, request.params)
 
 

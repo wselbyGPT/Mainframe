@@ -7,6 +7,7 @@ This starter bundle exposes a small FastAPI API plus a polling worker that can e
 
 ## What is implemented
 
+- `GET /api/templates` to discover available JCL templates and parameter specs
 - `POST /api/jobs` to queue a template-driven JCL job
 - worker polling loop
 - SQLite job store
@@ -16,6 +17,32 @@ This starter bundle exposes a small FastAPI API plus a polling worker that can e
 - best-effort JCL submission via TSO line-mode EDIT
 - best-effort `STATUS` polling and `OUTPUT` capture
 - spool normalization into JES / JCL / SYSOUT sections
+
+## Template catalog
+
+Use `GET /api/templates` to discover template IDs, descriptions, and required/optional parameters.
+
+Current templates:
+
+- `hello-world` (defaults: `job_name=HELLO1`, `message=HELLO FROM WEB PORTAL`)
+- `idcams-listcat` (requires `level`, default `job_name=LISTCAT`)
+- `iebgener-copy` (requires `input_dataset`, `output_dataset`, default `job_name=IEBGEN`)
+- `sort-basic` (requires `input_dataset`, `output_dataset`, default `job_name=SORTJOB`, default `sort_fields=1,10,CH,A`)
+
+### Validation behavior
+
+`POST /api/jobs` validates the `template_id` and `params` before queuing the job.
+
+- Unknown template IDs return HTTP `422`.
+- Missing required params return HTTP `422` with a message naming the missing field.
+- Invalid params (for example `job_name`) return HTTP `422` with a message naming the invalid field.
+
+`job_name` normalization and validation rules:
+
+- normalized to uppercase
+- must be at most 8 characters
+- must start with `A-Z`
+- remaining characters may be `A-Z`, `0-9`, `#`, `$`, `@`
 
 ## Important limitations
 
@@ -43,11 +70,16 @@ cp .env.example .env
 docker compose up --build
 ```
 
-## Quick test
+## Quick API examples
 
 ```bash
 curl http://localhost:8080/api/healthz
+curl http://localhost:8080/api/templates
+```
 
+### `hello-world`
+
+```bash
 curl -X POST http://localhost:8080/api/jobs \
   -H 'Content-Type: application/json' \
   -d '{
@@ -59,6 +91,70 @@ curl -X POST http://localhost:8080/api/jobs \
     }
   }'
 ```
+
+### `idcams-listcat`
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "template_id": "idcams-listcat",
+    "submitted_by": "william",
+    "params": {
+      "job_name": "LISTCAT",
+      "level": "SYS1"
+    }
+  }'
+```
+
+### `iebgener-copy`
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "template_id": "iebgener-copy",
+    "submitted_by": "william",
+    "params": {
+      "job_name": "COPYJOB",
+      "input_dataset": "SYS1.PROCLIB",
+      "output_dataset": "IBMUSER.PROCLIB"
+    }
+  }'
+```
+
+### `sort-basic`
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "template_id": "sort-basic",
+    "submitted_by": "william",
+    "params": {
+      "job_name": "SORTJOB",
+      "input_dataset": "IBMUSER.INPUT",
+      "output_dataset": "IBMUSER.OUTPUT",
+      "sort_fields": "1,8,CH,A"
+    }
+  }'
+```
+
+### Validation error example
+
+```bash
+curl -X POST http://localhost:8080/api/jobs \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "template_id": "idcams-listcat",
+    "submitted_by": "william",
+    "params": {
+      "job_name": "LISTCAT"
+    }
+  }'
+```
+
+Expected response status: `422`
 
 Then inspect:
 
