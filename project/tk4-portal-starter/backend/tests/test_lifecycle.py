@@ -94,20 +94,26 @@ class LifecycleApiTests(unittest.TestCase):
         self.client.close()
         self._tmp.cleanup()
 
+    def _auth_headers(self, username: str = 'alice', password: str = 'alice-pass') -> dict[str, str]:
+        response = self.client.post('/api/login', json={'username': username, 'password': password})
+        self.assertEqual(response.status_code, 200)
+        token = response.json()['access_token']
+        return {'Authorization': f'Bearer {token}'}
+
     def test_cancel_endpoint_conflict_from_completed(self) -> None:
-        job = db.create_job('hello-world', 'tester', {'message': 'hello'})
+        job = db.create_job('hello-world', 'alice', {'message': 'hello'})
         db.update_job(job['id'], state='completed', result='success')
 
-        response = self.client.post(f"/api/jobs/{job['id']}/cancel")
+        response = self.client.post(f"/api/jobs/{job['id']}/cancel", headers=self._auth_headers())
         self.assertEqual(response.status_code, 409)
         detail = response.json()['detail']
         self.assertEqual(detail['code'], 'invalid_transition')
 
     def test_retry_endpoint_returns_attempt_info_and_event_summary(self) -> None:
-        job = db.create_job('hello-world', 'tester', {'message': 'hello'})
+        job = db.create_job('hello-world', 'alice', {'message': 'hello'})
         db.update_job(job['id'], state='failed', result='error', stage='unexpected')
 
-        response = self.client.post(f"/api/jobs/{job['id']}/retry")
+        response = self.client.post(f"/api/jobs/{job['id']}/retry", headers=self._auth_headers())
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload['state'], 'queued')
@@ -116,9 +122,27 @@ class LifecycleApiTests(unittest.TestCase):
         self.assertEqual(payload['event_summary']['last_event'], 'job.retried')
 
     def test_requeue_endpoint_unknown_job_404(self) -> None:
-        response = self.client.post('/api/jobs/does-not-exist/requeue')
+        response = self.client.post('/api/jobs/does-not-exist/requeue', headers=self._auth_headers())
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()['detail']['code'], 'job_not_found')
+
+    def test_lifecycle_endpoints_require_authentication(self) -> None:
+        job = db.create_job('hello-world', 'alice', {'message': 'hello'})
+        response = self.client.post(f"/api/jobs/{job['id']}/cancel")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['detail']['code'], 'auth_required')
+
+    def test_lifecycle_endpoints_enforce_job_ownership(self) -> None:
+        job = db.create_job('hello-world', 'alice', {'message': 'hello'})
+        response = self.client.post(f"/api/jobs/{job['id']}/cancel", headers=self._auth_headers(username='bob', password='bob-pass'))
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()['detail']['code'], 'forbidden')
+
+    def test_lifecycle_endpoints_allow_admin_override(self) -> None:
+        job = db.create_job('hello-world', 'alice', {'message': 'hello'})
+        response = self.client.post(f"/api/jobs/{job['id']}/cancel", headers=self._auth_headers(username='admin', password='admin-pass'))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['state'], 'canceled')
 
 
 class WorkerCancellationRaceTests(unittest.TestCase):
