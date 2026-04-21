@@ -125,6 +125,46 @@ TEMPLATE_SCHEMAS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    'lattice-crypto-demo': {
+        'description': 'Emit a lattice cryptography runbook stub to SYSOUT for mainframe operator workflows.',
+        'params': {
+            'job_name': {
+                'type': 'string',
+                'required': False,
+                'default': 'LATTICE',
+                'format': 'jcl_job_name',
+                'help': 'JCL job name (1-8 chars, starts with A-Z, then A-Z0-9#$@).',
+                'examples': ['LATTICE', 'PQCDEMO1'],
+            },
+            'algorithm': {
+                'type': 'string',
+                'required': False,
+                'default': 'CRYSTALS-KYBER',
+                'help': 'Lattice KEM or signature algorithm label for run documentation.',
+                'examples': ['CRYSTALS-KYBER', 'CRYSTALS-DILITHIUM', 'FALCON'],
+            },
+            'security_level': {
+                'type': 'string',
+                'required': False,
+                'default': 'LEVEL1',
+                'help': 'Target parameter set/security tier label.',
+                'examples': ['LEVEL1', 'LEVEL3', 'LEVEL5'],
+            },
+            'key_dataset': {
+                'type': 'string',
+                'required': True,
+                'help': 'DSN placeholder for where generated key material should be managed.',
+                'examples': ['IBMUSER.PQC.KEYS'],
+            },
+            'notes': {
+                'type': 'string',
+                'required': False,
+                'default': 'PILOT - VALIDATE DATASET ACLS AND ROTATION POLICY',
+                'help': 'Free-form operations note recorded in SYSOUT.',
+                'examples': ['PILOT IN LPAR2', 'ROTATE KEYS WEEKLY'],
+            },
+        },
+    },
 }
 
 

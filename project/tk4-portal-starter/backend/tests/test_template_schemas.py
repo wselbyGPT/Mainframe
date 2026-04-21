@@ -50,7 +50,10 @@ class TemplateSchemaValidationTests(unittest.TestCase):
 class TemplateSchemaDiscoveryTests(unittest.TestCase):
     def test_catalog_has_all_templates(self) -> None:
         template_ids = {item['template_id'] for item in get_template_catalog()}
-        self.assertEqual(template_ids, {'hello-world', 'idcams-listcat', 'iebgener-copy', 'sort-basic'})
+        self.assertEqual(
+            template_ids,
+            {'hello-world', 'idcams-listcat', 'iebgener-copy', 'sort-basic', 'lattice-crypto-demo'},
+        )
 
     def test_get_single_template_schema(self) -> None:
         schema = get_template_schema('sort-basic')

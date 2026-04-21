@@ -17,6 +17,21 @@ class TemplateRenderingTests(unittest.TestCase):
         self.assertIn('//LISTCAT  JOB', jcl)
         self.assertIn("LISTCAT LEVEL('SYS1') ALL", jcl)
 
+    def test_render_lattice_crypto_demo_success(self) -> None:
+        jcl = render_template(
+            'lattice-crypto-demo',
+            {
+                'job_name': 'pqcjob1',
+                'algorithm': 'CRYSTALS-KYBER',
+                'security_level': 'LEVEL3',
+                'key_dataset': 'IBMUSER.PQC.KEYS',
+                'notes': 'PILOT',
+            },
+        )
+        self.assertIn('//PQCJOB1  JOB', jcl)
+        self.assertIn('ALGORITHM=CRYSTALS-KYBER', jcl)
+        self.assertIn('KEY_DATASET=IBMUSER.PQC.KEYS', jcl)
+
     def test_render_unknown_template_deterministic_error(self) -> None:
         with self.assertRaises(TemplateRenderError) as exc:
             render_template('unknown-template', {})
@@ -34,6 +49,11 @@ class TemplateValidationTests(unittest.TestCase):
         with self.assertRaises(TemplateSchemaError) as exc:
             validate_template_params('hello-world', {'job_name': '1BAD', 'message': 'X'})
         self.assertEqual(exc.exception.errors[0]['path'], 'params.job_name')
+
+    def test_lattice_crypto_requires_key_dataset(self) -> None:
+        with self.assertRaises(TemplateSchemaError) as exc:
+            validate_template_params('lattice-crypto-demo', {'job_name': 'PQCDEMO'})
+        self.assertEqual(exc.exception.errors[0]['path'], 'params.key_dataset')
 
 
 if __name__ == '__main__':

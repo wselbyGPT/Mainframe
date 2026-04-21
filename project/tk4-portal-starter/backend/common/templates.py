@@ -70,11 +70,29 @@ def render_sort_basic(params: dict[str, Any]) -> str:
     ])
 
 
+def render_lattice_crypto_demo(params: dict[str, Any]) -> str:
+    return '\n'.join([
+        f"//{params['job_name']:<8} JOB ,'PQC DEMO',CLASS=A,MSGCLASS=H,MSGLEVEL=(1,1)",
+        '//PQCSTEP  EXEC PGM=IEBGENER',
+        '//SYSUT1   DD *',
+        'POST-QUANTUM CRYPTOGRAPHY EXECUTION PLAN',
+        f"ALGORITHM={params['algorithm']}",
+        f"SECURITY_LEVEL={params['security_level']}",
+        f"KEY_DATASET={params['key_dataset']}",
+        f"NOTES={params['notes']}",
+        '/*',
+        '//SYSUT2   DD SYSOUT=H',
+        '//SYSPRINT DD SYSOUT=H',
+        '//SYSIN    DD DUMMY',
+    ])
+
+
 TEMPLATE_REGISTRY: dict[str, TemplateRenderer] = {
     'hello-world': render_hello_world,
     'idcams-listcat': render_idcams_listcat,
     'iebgener-copy': render_iebgener_copy,
     'sort-basic': render_sort_basic,
+    'lattice-crypto-demo': render_lattice_crypto_demo,
 }
 
 
