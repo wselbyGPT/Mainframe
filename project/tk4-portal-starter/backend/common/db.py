@@ -64,11 +64,18 @@ def init_db() -> None:
                 CREATE TABLE IF NOT EXISTS jobs (
                     id TEXT PRIMARY KEY,
                     template_id TEXT NOT NULL,
+                    template_version TEXT,
+                    template_hash TEXT,
                     submitted_by TEXT NOT NULL,
                     input_params_json TEXT NOT NULL,
+                    rendered_jcl TEXT,
                     attempt INTEGER NOT NULL DEFAULT 1,
                     parent_job_id TEXT,
                     retry_of_job_id TEXT,
+                    worker_version TEXT,
+                    worker_build TEXT,
+                    target_host TEXT,
+                    target_port INTEGER,
                     state TEXT NOT NULL,
                     result TEXT,
                     job_name TEXT,
@@ -110,6 +117,20 @@ def init_db() -> None:
                 conn.execute('ALTER TABLE jobs ADD COLUMN parent_job_id TEXT')
             if not _table_has_column(conn, 'jobs', 'retry_of_job_id'):
                 conn.execute('ALTER TABLE jobs ADD COLUMN retry_of_job_id TEXT')
+            if not _table_has_column(conn, 'jobs', 'template_version'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN template_version TEXT')
+            if not _table_has_column(conn, 'jobs', 'template_hash'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN template_hash TEXT')
+            if not _table_has_column(conn, 'jobs', 'rendered_jcl'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN rendered_jcl TEXT')
+            if not _table_has_column(conn, 'jobs', 'worker_version'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN worker_version TEXT')
+            if not _table_has_column(conn, 'jobs', 'worker_build'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN worker_build TEXT')
+            if not _table_has_column(conn, 'jobs', 'target_host'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN target_host TEXT')
+            if not _table_has_column(conn, 'jobs', 'target_port'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN target_port INTEGER')
             if not _table_has_column(conn, 'spool_sections', 'attempt'):
                 conn.execute('ALTER TABLE spool_sections ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1')
             if not _table_has_column(conn, 'job_events', 'attempt'):
@@ -119,7 +140,16 @@ def init_db() -> None:
             conn.close()
 
 
-def create_job(template_id: str, submitted_by: str, params: dict[str, Any]) -> dict[str, Any]:
+def create_job(
+    template_id: str,
+    submitted_by: str,
+    params: dict[str, Any],
+    *,
+    template_version: str | None = None,
+    template_hash: str | None = None,
+    target_host: str | None = None,
+    target_port: int | None = None,
+) -> dict[str, Any]:
     job_id = str(uuid.uuid4())
     now = _utcnow()
     with _LOCK:
@@ -128,11 +158,25 @@ def create_job(template_id: str, submitted_by: str, params: dict[str, Any]) -> d
             conn.execute(
                 """
                 INSERT INTO jobs (
-                    id, template_id, submitted_by, input_params_json, attempt, parent_job_id, state,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, template_id, template_version, template_hash, submitted_by, input_params_json,
+                    attempt, parent_job_id, target_host, target_port, state, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job_id, template_id, submitted_by, json.dumps(params), 1, job_id, 'queued', now, now),
+                (
+                    job_id,
+                    template_id,
+                    template_version,
+                    template_hash,
+                    submitted_by,
+                    json.dumps(params),
+                    1,
+                    job_id,
+                    target_host,
+                    target_port,
+                    'queued',
+                    now,
+                    now,
+                ),
             )
             conn.commit()
         finally:
@@ -374,6 +418,7 @@ def retry_job(job_id: str) -> dict[str, Any] | None:
                 UPDATE jobs
                 SET attempt = ?, state = ?, result = NULL, mainframe_job_id = NULL, return_code = NULL,
                     abend_code = NULL, error_text = NULL, stage = NULL, started_at = NULL, finished_at = NULL,
+                    rendered_jcl = NULL, worker_version = NULL, worker_build = NULL, target_host = NULL, target_port = NULL,
                     updated_at = ?, retry_of_job_id = ?
                 WHERE id = ?
                 """,
@@ -426,6 +471,7 @@ def requeue_job(job_id: str) -> dict[str, Any] | None:
                 UPDATE jobs
                 SET attempt = ?, state = ?, result = NULL, mainframe_job_id = NULL, return_code = NULL,
                     abend_code = NULL, error_text = NULL, stage = NULL, started_at = NULL, finished_at = NULL,
+                    rendered_jcl = NULL, worker_version = NULL, worker_build = NULL, target_host = NULL, target_port = NULL,
                     updated_at = ?, retry_of_job_id = NULL
                 WHERE id = ?
                 """,

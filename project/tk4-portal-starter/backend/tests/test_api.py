@@ -92,6 +92,30 @@ class TemplateApiTests(unittest.TestCase):
         self.assertEqual(stored['job_name'], 'HELLO1')
         self.assertEqual(stored['message'], 'DEFAULT FLOW')
 
+    def test_get_job_details_includes_stage_timeline_and_artifact_links(self) -> None:
+        created = self.client.post(
+            '/api/jobs',
+            json={
+                'template_id': 'hello-world',
+                'submitted_by': 'tester',
+                'params': {'job_name': 'hello9999', 'message': 'hello'},
+            },
+        )
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()['id']
+
+        response = self.client.get(f'/api/jobs/{job_id}')
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['normalized_params']['job_name'], 'HELLO999')
+        self.assertEqual(payload['stage_model']['current'], 'queued')
+        self.assertEqual(payload['stage_model']['timeline'][0]['stage'], 'queued')
+        self.assertEqual(payload['artifact_links']['spool'], f'/api/jobs/{job_id}/spool')
+        self.assertIn('jes', payload['artifact_links']['spool_sections'])
+        self.assertEqual(payload['template_version'], '1')
+        self.assertEqual(len(payload['template_hash']), 16)
+        self.assertEqual(payload['target_port'], 3270)
+
 
 if __name__ == '__main__':
     unittest.main()

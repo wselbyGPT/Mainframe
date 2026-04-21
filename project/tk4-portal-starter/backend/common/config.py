@@ -35,6 +35,8 @@ class Settings:
     job_poll_attempts: int = _get_int("JOB_POLL_ATTEMPTS", 15)
     s3270_bin: str = os.getenv("S3270_BIN", "s3270")
     s3270_model: str = os.getenv("S3270_MODEL", "2")
+    worker_version: str = os.getenv("WORKER_VERSION", "dev")
+    worker_build: str = os.getenv("WORKER_BUILD", "local")
 
 
 settings = Settings()

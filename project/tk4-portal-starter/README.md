@@ -9,6 +9,8 @@ This starter bundle exposes a small FastAPI API plus a polling worker that can e
 
 - `GET /api/templates` to discover available JCL templates and parameter specs
 - `POST /api/jobs` to queue a template-driven JCL job
+- `GET /api/jobs/{job_id}` to return rich job detail, stage timeline, normalized params, and artifact links
+- `GET /api/jobs/{job_id}/events` for SSE job event streaming (`/events/stream` remains supported)
 - lifecycle endpoints:
   - `POST /api/jobs/{job_id}/cancel`
   - `POST /api/jobs/{job_id}/retry`
@@ -21,6 +23,24 @@ This starter bundle exposes a small FastAPI API plus a polling worker that can e
 - best-effort JCL submission via TSO line-mode EDIT
 - best-effort `STATUS` polling and `OUTPUT` capture
 - spool normalization into JES / JCL / SYSOUT sections
+
+### Canonical stage model
+
+The API now exposes a canonical stage model for observability:
+
+`queued -> connecting -> logon -> submit -> poll -> capture -> done/failed`
+
+`GET /api/jobs/{job_id}` returns:
+
+- `stage_model.current`
+- `stage_model.timeline` (first-seen timestamp per stage)
+- `normalized_params`
+- `artifact_links` (`/spool` and per-section links)
+- execution provenance fields:
+  - `template_version`, `template_hash`
+  - `rendered_jcl`
+  - `worker_version`, `worker_build`
+  - `target_host`, `target_port`
 
 ## Template catalog
 

@@ -158,6 +158,34 @@ class WorkerCancellationRaceTests(unittest.TestCase):
         events = db.get_job_events(queued['id'])
         self.assertTrue(any(item['event_type'] == 'job.canceled' for item in events))
 
+    def test_run_job_records_execution_provenance(self) -> None:
+        from worker.runner import run_job
+
+        original = (settings.worker_version, settings.worker_build, settings.tk4_host, settings.tk4_port)
+        try:
+            object.__setattr__(settings, 'worker_version', 'test-version')
+            object.__setattr__(settings, 'worker_build', 'test-build')
+            object.__setattr__(settings, 'tk4_host', '127.0.0.9')
+            object.__setattr__(settings, 'tk4_port', 4023)
+
+            queued = db.create_job('hello-world', 'tester', {'message': 'hello', 'job_name': 'HELLO1'})
+            claimed = db.next_queued_job()
+            assert claimed is not None
+            run_job(claimed)
+
+            final_job = db.get_job(queued['id'])
+            assert final_job is not None
+            self.assertIn('//HELLO1', final_job['rendered_jcl'])
+            self.assertEqual(final_job['worker_version'], 'test-version')
+            self.assertEqual(final_job['worker_build'], 'test-build')
+            self.assertEqual(final_job['target_host'], '127.0.0.9')
+            self.assertEqual(final_job['target_port'], 4023)
+        finally:
+            object.__setattr__(settings, 'worker_version', original[0])
+            object.__setattr__(settings, 'worker_build', original[1])
+            object.__setattr__(settings, 'tk4_host', original[2])
+            object.__setattr__(settings, 'tk4_port', original[3])
+
 
 if __name__ == '__main__':
     unittest.main()

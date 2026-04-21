@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
+import json
 from typing import Any, Callable
 
 from common.template_schemas import (
+    TEMPLATE_SCHEMAS,
     TemplateSchemaError,
     UnknownTemplateError,
     get_template_catalog,
@@ -76,6 +80,7 @@ TEMPLATE_REGISTRY: dict[str, TemplateRenderer] = {
     'iebgener-copy': render_iebgener_copy,
     'sort-basic': render_sort_basic,
 }
+TEMPLATE_ENGINE_VERSION = '1'
 
 
 def validate_template_params(template_id: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -91,6 +96,21 @@ def render_template(template_id: str, params: dict[str, Any]) -> str:
     return renderer(normalized_params)
 
 
+def get_template_provenance(template_id: str) -> dict[str, str]:
+    renderer = TEMPLATE_REGISTRY.get(template_id)
+    schema = TEMPLATE_SCHEMAS.get(template_id)
+    if not renderer or not schema:
+        raise TemplateRenderError(code='unknown_template_id', message=f"Unknown template_id '{template_id}'")
+
+    renderer_source = inspect.getsource(renderer)
+    fingerprint_source = json.dumps(schema, sort_keys=True, separators=(',', ':')) + '\n' + renderer_source
+    template_hash = hashlib.sha256(fingerprint_source.encode('utf-8')).hexdigest()[:16]
+    return {
+        'template_version': TEMPLATE_ENGINE_VERSION,
+        'template_hash': template_hash,
+    }
+
+
 __all__ = [
     'TemplateRenderError',
     'TemplateValidationError',
@@ -98,5 +118,6 @@ __all__ = [
     'get_template_catalog',
     'normalize_and_validate_template_params',
     'render_template',
+    'get_template_provenance',
     'validate_template_params',
 ]

@@ -70,11 +70,28 @@ def run_job(job: dict) -> None:
 
     try:
         if settings.dry_run:
+            rendered_jcl = render_template(job['template_id'], params)
+            update_job(
+                job_id,
+                rendered_jcl=rendered_jcl,
+                worker_version=settings.worker_version,
+                worker_build=settings.worker_build,
+                target_host=settings.tk4_host,
+                target_port=settings.tk4_port,
+            )
             _run_dry(job_id, attempt, job_name, params)
             return
 
         _guard_active_attempt(job_id, attempt, 'writing_jcl')
         jcl = render_template(job['template_id'], params)
+        update_job(
+            job_id,
+            rendered_jcl=jcl,
+            worker_version=settings.worker_version,
+            worker_build=settings.worker_build,
+            target_host=settings.tk4_host,
+            target_port=settings.tk4_port,
+        )
         result = _run_real(job_id, attempt, job_name, jcl)
         _guard_active_attempt(job_id, attempt, 'reading_spool')
         sections = split_spool(result['raw_spool'])
