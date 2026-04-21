@@ -30,6 +30,12 @@ class TemplateApiTests(unittest.TestCase):
         cls.client.close()
         cls._tmp.cleanup()
 
+    def _auth_headers(self, username: str = 'alice', password: str = 'alice-pass') -> dict[str, str]:
+        response = self.client.post('/api/login', json={'username': username, 'password': password})
+        self.assertEqual(response.status_code, 200)
+        token = response.json()['access_token']
+        return {'Authorization': f'Bearer {token}'}
+
     def test_get_templates_catalog(self) -> None:
         response = self.client.get('/api/templates')
         self.assertEqual(response.status_code, 200)
@@ -56,6 +62,7 @@ class TemplateApiTests(unittest.TestCase):
         response = self.client.post(
             '/api/jobs',
             json={'template_id': 'does-not-exist', 'submitted_by': 'tester', 'params': {}},
+            headers=self._auth_headers(),
         )
         self.assertEqual(response.status_code, 422)
         detail = response.json()['detail']
@@ -66,6 +73,7 @@ class TemplateApiTests(unittest.TestCase):
         response = self.client.post(
             '/api/jobs',
             json={'template_id': 'idcams-listcat', 'submitted_by': 'tester', 'params': {'job_name': 'listcat'}},
+            headers=self._auth_headers(),
         )
         self.assertEqual(response.status_code, 422)
         detail = response.json()['detail']
@@ -81,6 +89,7 @@ class TemplateApiTests(unittest.TestCase):
                 'submitted_by': 'tester',
                 'params': {'job_name': 'hello9999', 'message': '  hello client  '},
             },
+            headers=self._auth_headers(),
         )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
@@ -89,14 +98,23 @@ class TemplateApiTests(unittest.TestCase):
         self.assertEqual(stored['message'], 'hello client')
 
     def test_post_jobs_hello_world_defaults_regression(self) -> None:
-        response = self.client.post('/api/jobs', json={'params': {'message': 'DEFAULT FLOW'}})
+        response = self.client.post(
+            '/api/jobs',
+            json={'params': {'message': 'DEFAULT FLOW'}},
+            headers=self._auth_headers(),
+        )
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertEqual(payload['template_id'], 'hello-world')
-        self.assertEqual(payload['submitted_by'], 'anonymous')
+        self.assertEqual(payload['submitted_by'], 'alice')
         stored = json.loads(payload['input_params_json'])
         self.assertEqual(stored['job_name'], 'HELLO1')
         self.assertEqual(stored['message'], 'DEFAULT FLOW')
+
+    def test_post_jobs_requires_authentication(self) -> None:
+        response = self.client.post('/api/jobs', json={'params': {'message': 'no auth'}})
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['detail']['code'], 'auth_required')
 
     def test_get_job_details_includes_stage_timeline_and_artifact_links(self) -> None:
         created = self.client.post(
@@ -106,6 +124,7 @@ class TemplateApiTests(unittest.TestCase):
                 'submitted_by': 'tester',
                 'params': {'job_name': 'hello9999', 'message': 'hello'},
             },
+            headers=self._auth_headers(),
         )
         self.assertEqual(created.status_code, 200)
         job_id = created.json()['id']

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from pathlib import Path
 from typing import Any
 
@@ -41,12 +42,22 @@ _SSE_MAX_BATCH_SIZE = 100
 _SSE_BACKLOG_LIMIT = 200
 _TERMINAL_STATES = {'completed', 'failed', 'canceled'}
 _CANONICAL_STAGE_ORDER = ['queued', 'connecting', 'logon', 'submit', 'poll', 'capture', 'done', 'failed']
+_USERS = {
+    'alice': {'password': 'alice-pass', 'role': 'submitter'},
+    'bob': {'password': 'bob-pass', 'role': 'submitter'},
+    'admin': {'password': 'admin-pass', 'role': 'admin'},
+}
+_TOKENS: dict[str, dict[str, str]] = {}
 
 
 class CreateJobRequest(BaseModel):
     template_id: str = Field(default='hello-world')
-    submitted_by: str = Field(default='anonymous')
     params: dict[str, Any] = Field(default_factory=dict)
+
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
 
 
 @app.on_event('startup')
@@ -77,18 +88,29 @@ def template_details(template_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=exc.to_dict()) from exc
 
 
+@app.post('/api/login')
+def login_route(request: LoginRequest) -> dict[str, str]:
+    user = _USERS.get(request.username)
+    if not user or user['password'] != request.password:
+        raise HTTPException(status_code=401, detail={'code': 'invalid_credentials', 'message': 'Invalid credentials'})
+    token = secrets.token_urlsafe(24)
+    _TOKENS[token] = {'username': request.username, 'role': user['role']}
+    return {'access_token': token, 'token_type': 'Bearer', 'username': request.username, 'role': user['role']}
+
+
 @app.get('/api/jobs')
 def jobs() -> list[dict[str, Any]]:
     return [_build_job_payload(job) for job in list_jobs()]
 
 
 @app.post('/api/jobs')
-def create_job_route(request: CreateJobRequest) -> dict[str, Any]:
+def create_job_route(request: CreateJobRequest, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    principal = _require_auth_principal(authorization)
     try:
         normalized_params = normalize_and_validate_template_params(request.template_id, request.params)
     except TemplateSchemaError as exc:
         raise HTTPException(status_code=422, detail=exc.to_dict()) from exc
-    return _build_job_payload(create_job(request.template_id, request.submitted_by, normalized_params))
+    return _build_job_payload(create_job(request.template_id, principal['username'], normalized_params))
 
 
 @app.get('/api/jobs/{job_id}')
@@ -215,7 +237,37 @@ def _build_artifact_links(job: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _apply_transition(job_id: str, transition_fn: Any) -> dict[str, Any]:
+def _require_auth_principal(authorization: str | None) -> dict[str, str]:
+    if not authorization:
+        raise HTTPException(status_code=401, detail={'code': 'auth_required', 'message': 'Authorization required'})
+    scheme, _, token = authorization.partition(' ')
+    if scheme.lower() != 'bearer' or not token:
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Invalid authorization header'})
+    principal = _TOKENS.get(token)
+    if not principal:
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Invalid access token'})
+    return principal
+
+
+def _require_job_ownership(job_id: str, principal: dict[str, str]) -> None:
+    if principal['role'] == 'admin':
+        return
+    job = get_job(job_id)
+    if not job:
+        return
+    if job.get('submitted_by') != principal['username']:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                'code': 'forbidden',
+                'message': f"User '{principal['username']}' cannot manage job owned by '{job.get('submitted_by')}'",
+            },
+        )
+
+
+def _apply_transition(job_id: str, transition_fn: Any, authorization: str | None) -> dict[str, Any]:
+    principal = _require_auth_principal(authorization)
+    _require_job_ownership(job_id, principal)
     try:
         job = transition_fn(job_id)
     except JobTransitionError as exc:
@@ -226,18 +278,18 @@ def _apply_transition(job_id: str, transition_fn: Any) -> dict[str, Any]:
 
 
 @app.post('/api/jobs/{job_id}/cancel')
-def cancel_job_route(job_id: str) -> dict[str, Any]:
-    return _apply_transition(job_id, cancel_job)
+def cancel_job_route(job_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    return _apply_transition(job_id, cancel_job, authorization)
 
 
 @app.post('/api/jobs/{job_id}/retry')
-def retry_job_route(job_id: str) -> dict[str, Any]:
-    return _apply_transition(job_id, retry_job)
+def retry_job_route(job_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    return _apply_transition(job_id, retry_job, authorization)
 
 
 @app.post('/api/jobs/{job_id}/requeue')
-def requeue_job_route(job_id: str) -> dict[str, Any]:
-    return _apply_transition(job_id, requeue_job)
+def requeue_job_route(job_id: str, authorization: str | None = Header(default=None)) -> dict[str, Any]:
+    return _apply_transition(job_id, requeue_job, authorization)
 
 
 def _to_sse_frame(event_id: int, event_type: str, payload: dict[str, Any]) -> str:
