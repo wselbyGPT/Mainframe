@@ -3,16 +3,22 @@ from __future__ import annotations
 import re
 
 
-READY_RE = re.compile(r'(^|\n)READY\b', re.IGNORECASE)
+READY_RE = re.compile(r'(^|\n)\s*(READY|READY>)\b', re.IGNORECASE)
 PASSWORD_RE = re.compile(r'PASSWORD', re.IGNORECASE)
 USERID_RE = re.compile(r'USER\s*ID|USERID|ENTER\s+USERID|LOGON', re.IGNORECASE)
 APPLID_RE = re.compile(r'APPLID', re.IGNORECASE)
-INPUT_RE = re.compile(r'INPUT\b', re.IGNORECASE)
+INPUT_RE = re.compile(r'INPUT\b|ENTER\s+INPUT|===>\s*INPUT', re.IGNORECASE)
 JOBID_RE = re.compile(r'\b(JOB\d{3,7})\b', re.IGNORECASE)
 RC_RE = re.compile(r'COND\s+CODE\s+([0-9]{4})|RC=([0-9]{4})', re.IGNORECASE)
 ABEND_RE = re.compile(r'\b(S[0-9A-F]{3}|U[0-9A-F]{4})\b', re.IGNORECASE)
 DONE_RE = re.compile(r'OUTPUT\s+QUEUE|ON\s+OUTPUT\s+QUEUE|HELD|COND\s+CODE|RC=', re.IGNORECASE)
 JCL_ERROR_RE = re.compile(r'IEFC\d+I|JCL\s+ERROR', re.IGNORECASE)
+TSO_CONTEXT_RE = re.compile(r'\b(TSO|ISPF|READY|IKJ\d{5}[A-Z])\b', re.IGNORECASE)
+LOGIN_ERROR_RE = re.compile(
+    r'INVALID\s+(USERID|PASSWORD)|IKJ56425I|IKJ56701I|NOT\s+AUTHORIZED|LOGON\s+REJECTED',
+    re.IGNORECASE,
+)
+DATASET_ERROR_RE = re.compile(r'DATA\s*SET\s+NOT\s+FOUND|NOT\s+CATALOGED|IKJ56228I', re.IGNORECASE)
 
 
 def normalize(text: str) -> str:
@@ -62,3 +68,15 @@ def looks_done(text: str) -> bool:
 
 def looks_jcl_error(text: str) -> bool:
     return bool(JCL_ERROR_RE.search(normalize(text)))
+
+
+def looks_like_tso_screen(text: str) -> bool:
+    return bool(TSO_CONTEXT_RE.search(normalize(text)))
+
+
+def has_login_error(text: str) -> bool:
+    return bool(LOGIN_ERROR_RE.search(normalize(text)))
+
+
+def has_dataset_error(text: str) -> bool:
+    return bool(DATASET_ERROR_RE.search(normalize(text)))
