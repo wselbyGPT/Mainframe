@@ -14,6 +14,12 @@ const jobIdNode = document.getElementById('jobId');
 const currentStageNode = document.getElementById('currentStage');
 const timelineNode = document.getElementById('timeline');
 const eventsNode = document.getElementById('events');
+const spoolSectionTypeNode = document.getElementById('spoolSectionType');
+const spoolQueryNode = document.getElementById('spoolQuery');
+const refreshSpoolBtn = document.getElementById('refreshSpoolBtn');
+const downloadSpoolBtn = document.getElementById('downloadSpoolBtn');
+const spoolMetaNode = document.getElementById('spoolMeta');
+const spoolContentNode = document.getElementById('spoolContent');
 
 async function loadTemplates() {
   const response = await fetch('/api/templates');
@@ -110,6 +116,7 @@ async function submitJob() {
   currentStageNode.textContent = payload.stage_model?.current || '-';
   startEventStream(payload.id);
   refreshJobStatus(payload.id);
+  refreshSpoolView(payload.id);
 }
 
 function renderTimeline(items) {
@@ -138,6 +145,50 @@ async function refreshJobStatus(jobId) {
   const payload = await response.json();
   currentStageNode.textContent = payload.stage_model?.current || '-';
   renderTimeline(payload.stage_model?.timeline || []);
+}
+
+function spoolUrl(jobId, asText = false) {
+  const endpoint = asText ? 'text' : '';
+  const base = endpoint ? `/api/jobs/${jobId}/spool/${endpoint}` : `/api/jobs/${jobId}/spool`;
+  const search = new URLSearchParams();
+  const sectionType = spoolSectionTypeNode.value;
+  const query = spoolQueryNode.value.trim();
+  if (sectionType) {
+    search.set('section_type', sectionType);
+  }
+  if (query) {
+    search.set('query', query);
+  }
+  const suffix = search.toString();
+  return suffix ? `${base}?${suffix}` : base;
+}
+
+async function refreshSpoolView(jobId = state.activeJobId) {
+  if (!jobId) {
+    spoolMetaNode.textContent = 'No active job selected.';
+    spoolContentNode.textContent = '';
+    return;
+  }
+  const response = await fetch(spoolUrl(jobId));
+  if (!response.ok) {
+    spoolMetaNode.textContent = `Spool unavailable for job ${jobId}.`;
+    spoolContentNode.textContent = '';
+    return;
+  }
+  const payload = await response.json();
+  const sections = payload.sections || [];
+  spoolMetaNode.textContent = `Showing ${sections.length} section(s) for job ${jobId}.`;
+  spoolContentNode.textContent = sections
+    .map((item) => `===== ${item.section_type.toUpperCase()} #${item.ordinal} =====\n${item.content_text}`)
+    .join('\n\n');
+}
+
+function downloadSpool(jobId = state.activeJobId) {
+  if (!jobId) {
+    spoolMetaNode.textContent = 'No active job selected.';
+    return;
+  }
+  window.open(spoolUrl(jobId, true), '_blank');
 }
 
 function startEventStream(jobId) {
@@ -171,6 +222,12 @@ submitBtn.addEventListener('click', () => {
     submitResult.textContent = JSON.stringify({ error: error.message }, null, 2);
   });
 });
+refreshSpoolBtn.addEventListener('click', () => {
+  refreshSpoolView().catch((error) => {
+    spoolMetaNode.textContent = `Error loading spool: ${error.message}`;
+  });
+});
+downloadSpoolBtn.addEventListener('click', () => downloadSpool());
 
 loadTemplates().catch((error) => {
   submitResult.textContent = JSON.stringify({ error: error.message }, null, 2);

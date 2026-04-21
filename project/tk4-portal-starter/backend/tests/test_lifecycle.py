@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 try:
@@ -78,6 +79,16 @@ class LifecycleDbTransitionTests(unittest.TestCase):
         db.update_job(job['id'], state='completed', result='success')
         with self.assertRaises(db.JobTransitionError):
             db.requeue_job(job['id'])
+
+    def test_cleanup_old_jobs_removes_expired_artifacts(self) -> None:
+        job = db.create_job('hello-world', 'tester', {'message': 'hello'})
+        db.replace_spool_sections(job['id'], [{'section_type': 'jes', 'ordinal': 1, 'content_text': 'DONE'}])
+        old_finished_at = (datetime.now(timezone.utc) - timedelta(days=90)).isoformat()
+        db.update_job(job['id'], state='completed', result='success', finished_at=old_finished_at)
+
+        cleanup = db.cleanup_old_jobs(retention_days=30, limit=50)
+        self.assertEqual(cleanup['jobs_deleted'], 1)
+        self.assertEqual(db.get_job(job['id']), None)
 
 
 @unittest.skipIf(TestClient is None, 'fastapi is not installed in this execution environment')

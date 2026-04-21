@@ -34,6 +34,31 @@
         <h3>Event stream</h3>
         <ul id="events"></ul>
       </section>
+
+      <section class="card">
+        <h2>Spool viewer</h2>
+        <div class="row">
+          <div>
+            <label for="spoolSectionType">Section</label>
+            <select id="spoolSectionType">
+              <option value="">All sections</option>
+              <option value="jes">JES</option>
+              <option value="jcl">JCL</option>
+              <option value="sysout">SYSOUT</option>
+            </select>
+          </div>
+          <div>
+            <label for="spoolQuery">Search text</label>
+            <input id="spoolQuery" type="text" placeholder="e.g. RC=0000 or ABEND" />
+          </div>
+        </div>
+        <div class="row">
+          <button id="refreshSpoolBtn" type="button">Refresh spool view</button>
+          <button id="downloadSpoolBtn" type="button">Download as text</button>
+        </div>
+        <p id="spoolMeta" class="muted">Run a job and then load spool output here.</p>
+        <pre id="spoolContent"></pre>
+      </section>
     </main>
 
     <script src="/static/app.js"></script>

@@ -27,6 +27,9 @@ This starter bundle exposes a small FastAPI API plus a polling worker that can e
 - stronger TK4 screen recognizers (TSO context, auth failures, dataset diagnostics)
 - richer failure taxonomy in `job.error` payloads with remediation guidance
 - spool normalization into JES / JCL / SYSOUT sections
+- searchable spool viewer with section/query filters
+- spool download-as-text endpoint for artifact export
+- configurable retention/cleanup loop for old jobs and artifacts
 
 ### Canonical stage model
 
@@ -186,6 +189,21 @@ The UI provides:
 - dynamic parameter form driven by template schema
 - submit action via `POST /api/jobs`
 - live stage/event updates via `GET /api/jobs/{job_id}` and `GET /api/jobs/{job_id}/events`
+- spool search/filter and text download
+
+## Spool UX and artifact endpoints
+
+- `GET /api/jobs/{job_id}/spool?section_type=jes&query=RC=0000` filters sections server-side.
+- `GET /api/jobs/{job_id}/spool/{section_type}?query=ABEND` returns merged text for one section type.
+- `GET /api/jobs/{job_id}/spool/text?...` downloads matched spool as plain text attachment.
+
+## Retention and cleanup
+
+Cleanup runs in-process on a configurable interval:
+
+- `SPOOL_RETENTION_DAYS` (default: `14`)
+- `CLEANUP_INTERVAL_SECONDS` (default: `300`)
+- `CLEANUP_BATCH_SIZE` (default: `100`)
 
 ### `hello-world`
 

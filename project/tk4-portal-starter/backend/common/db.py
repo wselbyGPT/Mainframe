@@ -4,7 +4,7 @@ import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -251,6 +251,39 @@ def get_spool_sections(job_id: str) -> list[dict[str, Any]]:
         conn.close()
 
 
+def search_spool_sections(
+    job_id: str,
+    query: str | None = None,
+    section_type: str | None = None,
+) -> list[dict[str, Any]]:
+    conn = connect()
+    try:
+        job = conn.execute('SELECT attempt FROM jobs WHERE id = ?', (job_id,)).fetchone()
+        if not job:
+            return []
+        clauses = ['job_id = ?', 'attempt = ?']
+        params: list[Any] = [job_id, int(job['attempt'])]
+        if section_type:
+            clauses.append('section_type = ?')
+            params.append(section_type.strip().lower())
+        if query and query.strip():
+            clauses.append('LOWER(content_text) LIKE ?')
+            params.append(f"%{query.strip().lower()}%")
+        where_sql = ' AND '.join(clauses)
+        rows = conn.execute(
+            f"""
+            SELECT attempt, section_type, ordinal, content_text
+            FROM spool_sections
+            WHERE {where_sql}
+            ORDER BY ordinal ASC
+            """,
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def get_job_events(job_id: str) -> list[dict[str, Any]]:
     conn = connect()
     try:
@@ -446,5 +479,49 @@ def requeue_job(job_id: str) -> dict[str, Any] | None:
             conn.commit()
             fresh = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
             return dict(fresh) if fresh else None
+        finally:
+            conn.close()
+
+
+def cleanup_old_jobs(retention_days: int, limit: int = 100) -> dict[str, int]:
+    safe_retention_days = max(1, int(retention_days))
+    safe_limit = max(1, min(int(limit), 5000))
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=safe_retention_days)).isoformat()
+    with _LOCK:
+        conn = connect()
+        try:
+            rows = conn.execute(
+                """
+                SELECT id
+                FROM jobs
+                WHERE COALESCE(finished_at, created_at) < ?
+                ORDER BY COALESCE(finished_at, created_at) ASC
+                LIMIT ?
+                """,
+                (cutoff, safe_limit),
+            ).fetchall()
+            job_ids = [row['id'] for row in rows]
+            if not job_ids:
+                return {'jobs_deleted': 0, 'events_deleted': 0, 'spool_sections_deleted': 0}
+
+            placeholders = ','.join('?' for _ in job_ids)
+            spool_deleted = conn.execute(
+                f'DELETE FROM spool_sections WHERE job_id IN ({placeholders})',
+                job_ids,
+            ).rowcount
+            events_deleted = conn.execute(
+                f'DELETE FROM job_events WHERE job_id IN ({placeholders})',
+                job_ids,
+            ).rowcount
+            jobs_deleted = conn.execute(
+                f'DELETE FROM jobs WHERE id IN ({placeholders})',
+                job_ids,
+            ).rowcount
+            conn.commit()
+            return {
+                'jobs_deleted': int(jobs_deleted or 0),
+                'events_deleted': int(events_deleted or 0),
+                'spool_sections_deleted': int(spool_deleted or 0),
+            }
         finally:
             conn.close()
