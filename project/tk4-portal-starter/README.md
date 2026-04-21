@@ -11,6 +11,7 @@ This starter bundle exposes a small FastAPI API plus a polling worker that can e
 - `POST /api/jobs` to queue a template-driven JCL job
 - `GET /api/jobs/{job_id}` to return rich job detail, stage timeline, normalized params, and artifact links
 - `GET /api/jobs/{job_id}/events` for SSE job event streaming (`/events/stream` remains supported)
+- `GET /` minimal web UI for template-based submission and live status updates
 - lifecycle endpoints:
   - `POST /api/jobs/{job_id}/cancel`
   - `POST /api/jobs/{job_id}/retry`
@@ -159,6 +160,21 @@ docker compose up --build
 curl http://localhost:8080/api/healthz
 curl http://localhost:8080/api/templates
 ```
+
+## Minimal web UI
+
+Open:
+
+```bash
+open http://localhost:8080/
+```
+
+The UI provides:
+
+- template picker from `GET /api/templates`
+- dynamic parameter form driven by template schema
+- submit action via `POST /api/jobs`
+- live stage/event updates via `GET /api/jobs/{job_id}` and `GET /api/jobs/{job_id}/events`
 
 ### `hello-world`
 

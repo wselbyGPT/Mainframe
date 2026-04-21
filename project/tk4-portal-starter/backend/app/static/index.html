@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TK4 Portal UI</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>TK4 Portal</h1>
+      <p class="lead">Submit template-based jobs and monitor stage progress live.</p>
+
+      <section class="card">
+        <h2>Submit job</h2>
+        <label for="templateSelect">Template</label>
+        <select id="templateSelect"></select>
+
+        <label for="submittedBy">Submitted by</label>
+        <input id="submittedBy" type="text" value="web-ui" maxlength="64" />
+
+        <form id="paramsForm" class="stack"></form>
+
+        <button id="submitBtn" type="button">Submit job</button>
+        <pre id="submitResult"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Live status</h2>
+        <p>Current job: <code id="jobId">none</code></p>
+        <p>Current stage: <strong id="currentStage">-</strong></p>
+        <h3>Stage timeline</h3>
+        <ul id="timeline"></ul>
+        <h3>Event stream</h3>
+        <ul id="events"></ul>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

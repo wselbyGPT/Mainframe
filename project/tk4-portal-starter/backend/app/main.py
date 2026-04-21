@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from common.db import (
@@ -30,6 +32,8 @@ from common.template_schemas import (
 )
 
 app = FastAPI(title='TK4 Portal')
+_STATIC_DIR = Path(__file__).resolve().parent / 'static'
+app.mount('/static', StaticFiles(directory=str(_STATIC_DIR)), name='static')
 
 _SSE_POLL_SECONDS = 1.0
 _SSE_KEEPALIVE_SECONDS = 15.0
@@ -53,6 +57,11 @@ def startup() -> None:
 @app.get('/api/healthz')
 def healthz() -> dict[str, str]:
     return {'status': 'ok'}
+
+
+@app.get('/')
+def index() -> FileResponse:
+    return FileResponse(_STATIC_DIR / 'index.html')
 
 
 @app.get('/api/templates')
