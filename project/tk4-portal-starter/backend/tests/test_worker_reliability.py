@@ -1,4 +1,7 @@
-from worker.runner import AutomationFailure, _build_failure_payload
+from unittest.mock import patch
+
+from common.config import settings
+from worker.runner import AutomationFailure, _build_failure_payload, _logon
 from worker.screen_recognizers import has_login_error, looks_like_tso_screen, wants_userid
 
 
@@ -25,3 +28,73 @@ def test_failure_payload_includes_taxonomy_and_remediation() -> None:
     assert payload["code"] == "credentials_rejected"
     assert payload["retryable"] is False
     assert payload["remediation"]
+
+
+class _FakeS3270Client:
+    def __init__(self, screens: list[str]) -> None:
+        self._screens = screens
+        self._cursor = 0
+        self.actions: list[tuple[str, str | None]] = []
+
+    def connect(self, host: str, port: int) -> None:
+        self.actions.append(("connect", f"{host}:{port}"))
+
+    def wait_output(self, timeout: float | None = None) -> None:
+        self.actions.append(("wait_output", str(timeout)))
+
+    def ascii(self) -> str:
+        current = self._screens[min(self._cursor, len(self._screens) - 1)]
+        self._cursor += 1
+        return current
+
+    def enter(self) -> None:
+        self.actions.append(("enter", None))
+
+    def erase_input(self) -> None:
+        self.actions.append(("erase_input", None))
+
+    def tab(self) -> None:
+        self.actions.append(("tab", None))
+
+    def string(self, value: str) -> None:
+        self.actions.append(("string", value))
+
+
+def test_ipl_smoke_logon_flow_reaches_ready_prompt() -> None:
+    object.__setattr__(settings, "tso_user", "IBMUSER")
+    object.__setattr__(settings, "tso_pass", "SYS1")
+    fake = _FakeS3270Client(
+        [
+            "TK4- MVS 3.8j\nAPPLICATION REQUESTED APPLID",
+            "ENTER USERID",
+            "ENTER CURRENT PASSWORD",
+            "IKJ56455I USERID IBMUSER\nREADY",
+        ]
+    )
+
+    with patch("worker.runner.time.sleep", return_value=None):
+        screen = _logon(fake)  # type: ignore[arg-type]
+
+    assert "READY" in screen
+    assert ("string", "IBMUSER") in fake.actions
+    assert ("string", "SYS1") in fake.actions
+
+
+def test_ipl_smoke_logon_reports_credential_rejection() -> None:
+    object.__setattr__(settings, "tso_user", "BADUSER")
+    object.__setattr__(settings, "tso_pass", "BADPASS")
+    fake = _FakeS3270Client(
+        [
+            "TK4- MVS 3.8j\nAPPLICATION REQUESTED APPLID",
+            "ENTER USERID",
+            "IKJ56701I INVALID USERID OR PASSWORD",
+        ]
+    )
+
+    with patch("worker.runner.time.sleep", return_value=None):
+        try:
+            _logon(fake)  # type: ignore[arg-type]
+            assert False, "expected AutomationFailure"
+        except AutomationFailure as exc:
+            assert exc.code == "credentials_rejected"
+            assert exc.stage == "logging_in"
