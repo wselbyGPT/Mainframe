@@ -14,6 +14,8 @@ const jobIdNode = document.getElementById('jobId');
 const currentStageNode = document.getElementById('currentStage');
 const timelineNode = document.getElementById('timeline');
 const eventsNode = document.getElementById('events');
+const opsHealthNode = document.getElementById('opsHealth');
+const opsStageMetricsNode = document.getElementById('opsStageMetrics');
 const spoolSectionTypeNode = document.getElementById('spoolSectionType');
 const spoolQueryNode = document.getElementById('spoolQuery');
 const refreshSpoolBtn = document.getElementById('refreshSpoolBtn');
@@ -145,6 +147,24 @@ async function refreshJobStatus(jobId) {
   const payload = await response.json();
   currentStageNode.textContent = payload.stage_model?.current || '-';
   renderTimeline(payload.stage_model?.timeline || []);
+  refreshOpsDashboard();
+}
+
+async function refreshOpsDashboard() {
+  const response = await fetch('/api/ops/dashboard');
+  if (!response.ok) {
+    opsHealthNode.textContent = 'Unable to load ops dashboard.';
+    return;
+  }
+  const payload = await response.json();
+  const health = payload.health || {};
+  opsHealthNode.textContent = `Status=${health.status || 'unknown'} · jobs=${health.total_jobs || 0} · failed=${health.failed_jobs || 0} · failure_rate=${health.failure_rate || 0}`;
+  opsStageMetricsNode.innerHTML = '';
+  for (const item of payload.stage_metrics || []) {
+    const line = document.createElement('li');
+    line.textContent = `${item.stage}: avg=${item.avg_ms}ms p95=${item.p95_ms}ms max=${item.max_ms}ms (n=${item.samples})`;
+    opsStageMetricsNode.appendChild(line);
+  }
 }
 
 function spoolUrl(jobId, asText = false) {
@@ -232,3 +252,8 @@ downloadSpoolBtn.addEventListener('click', () => downloadSpool());
 loadTemplates().catch((error) => {
   submitResult.textContent = JSON.stringify({ error: error.message }, null, 2);
 });
+
+refreshOpsDashboard();
+setInterval(() => {
+  refreshOpsDashboard().catch(() => {});
+}, 10000);

@@ -7,6 +7,7 @@ from typing import Callable
 
 from common.config import settings
 from common.db import add_event, get_job, replace_spool_sections, update_job
+from common.observability import get_logger, setup_logging, stage_duration_ms
 from common.spool_parser import split_spool
 from common.templates import render_template
 from worker.s3270_client import S3270Client, S3270Error
@@ -65,6 +66,8 @@ _STAGE_RETRY_POLICIES: dict[str, RetryPolicy] = {
     'waiting_for_completion': RetryPolicy(attempts=2, delay_seconds=1.0),
     'reading_spool': RetryPolicy(attempts=2, delay_seconds=0.75),
 }
+setup_logging()
+logger = get_logger(__name__)
 
 
 def _utcnow() -> str:
@@ -91,6 +94,7 @@ def run_job(job: dict) -> None:
     _guard_active_attempt(job_id, attempt, 'starting')
     update_job(job_id, job_name=job_name)
     add_event(job_id, 'job.state', {'state': 'starting', 'attempt': attempt}, attempt=attempt)
+    logger.info('job.start', job_id=job_id, attempt=attempt, context={'job_name': job_name})
 
     try:
         if settings.dry_run:
@@ -114,6 +118,7 @@ def run_job(job: dict) -> None:
             finished_at=_utcnow(),
         )
         add_event(job_id, 'job.result', {**result, 'attempt': attempt}, attempt=attempt)
+        logger.info('job.result', job_id=job_id, attempt=attempt, context={'result': result['result']})
     except JobAborted as exc:
         if exc.reason == 'job_canceled':
             update_job(
@@ -124,6 +129,7 @@ def run_job(job: dict) -> None:
                 finished_at=_utcnow(),
             )
             add_event(job_id, 'job.canceled', {'stage': exc.stage, 'attempt': attempt}, attempt=attempt)
+            logger.warning('job.canceled', job_id=job_id, stage=exc.stage, attempt=attempt)
         else:
             add_event(
                 job_id,
@@ -131,6 +137,7 @@ def run_job(job: dict) -> None:
                 {'stage': exc.stage, 'attempt': attempt, 'reason': exc.reason},
                 attempt=attempt,
             )
+            logger.warning('job.superseded', job_id=job_id, stage=exc.stage, attempt=attempt, context={'reason': exc.reason})
     except AutomationFailure as exc:
         _guard_active_attempt(job_id, attempt, exc.stage)
         if exc.screen:
@@ -150,6 +157,7 @@ def run_job(job: dict) -> None:
             {**failure_payload, 'attempt': attempt},
             attempt=attempt,
         )
+        logger.error('job.error', job_id=job_id, stage=exc.stage, attempt=attempt, context=failure_payload)
     except Exception as exc:
         _guard_active_attempt(job_id, attempt, 'unexpected')
         update_job(
@@ -161,6 +169,7 @@ def run_job(job: dict) -> None:
             finished_at=_utcnow(),
         )
         add_event(job_id, 'job.error', {'stage': 'unexpected', 'detail': str(exc), 'attempt': attempt}, attempt=attempt)
+        logger.error('job.error', job_id=job_id, stage='unexpected', attempt=attempt, context={'detail': str(exc)})
 
 
 def _run_dry(job_id: str, attempt: int, job_name: str, params: dict) -> None:
@@ -464,11 +473,44 @@ def _run_with_stage_retry(job_id: str, attempt: int, stage: str, fn: Callable[[]
             {'stage': stage, 'stage_attempt': current_attempt, 'stage_attempts': policy.attempts, 'attempt': attempt},
             attempt=attempt,
         )
+        started_at = _utcnow()
+        logger.info(
+            'stage.start',
+            job_id=job_id,
+            stage=stage,
+            attempt=attempt,
+            context={'stage_attempt': current_attempt, 'stage_attempts': policy.attempts},
+        )
         try:
-            return fn()
+            result = fn()
+            ended_at = _utcnow()
+            duration_ms = stage_duration_ms(started_at, ended_at)
+            add_event(
+                job_id,
+                'job.stage_duration',
+                {
+                    'stage': stage,
+                    'stage_attempt': current_attempt,
+                    'duration_ms': duration_ms,
+                    'started_at': started_at,
+                    'finished_at': ended_at,
+                    'attempt': attempt,
+                },
+                attempt=attempt,
+            )
+            logger.info(
+                'stage.done',
+                job_id=job_id,
+                stage=stage,
+                attempt=attempt,
+                context={'stage_attempt': current_attempt, 'duration_ms': duration_ms},
+            )
+            return result
         except AutomationFailure as exc:
             classified = _classify_failure(exc)
             last_failure = classified
+            ended_at = _utcnow()
+            duration_ms = stage_duration_ms(started_at, ended_at)
             add_event(
                 job_id,
                 'job.retry.failed_attempt',
@@ -478,9 +520,17 @@ def _run_with_stage_retry(job_id: str, attempt: int, stage: str, fn: Callable[[]
                     'code': classified.code,
                     'retryable': classified.retryable,
                     'detail': classified.detail,
+                    'duration_ms': duration_ms,
                     'attempt': attempt,
                 },
                 attempt=attempt,
+            )
+            logger.warning(
+                'stage.failed',
+                job_id=job_id,
+                stage=stage,
+                attempt=attempt,
+                context={'stage_attempt': current_attempt, 'duration_ms': duration_ms, 'code': classified.code},
             )
             if not classified.retryable or current_attempt >= policy.attempts:
                 raise classified

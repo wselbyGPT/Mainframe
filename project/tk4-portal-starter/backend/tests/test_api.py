@@ -135,6 +135,7 @@ class TemplateApiTests(unittest.TestCase):
         self.assertEqual(payload['normalized_params']['job_name'], 'HELLO999')
         self.assertEqual(payload['stage_model']['current'], 'queued')
         self.assertEqual(payload['stage_model']['timeline'][0]['stage'], 'queued')
+        self.assertIn('durations_ms', payload['stage_model'])
         self.assertEqual(payload['artifact_links']['spool'], f'/api/jobs/{job_id}/spool')
         self.assertEqual(payload['artifact_links']['spool_text'], f'/api/jobs/{job_id}/spool/text')
         self.assertIn('jes', payload['artifact_links']['spool_sections'])
@@ -164,6 +165,24 @@ class TemplateApiTests(unittest.TestCase):
         self.assertIn('text/plain', download.headers['content-type'])
         self.assertIn('attachment; filename=', download.headers['content-disposition'])
         self.assertIn('HELLO WORLD', download.text)
+
+    def test_ops_dashboard_exposes_health_and_stage_metrics(self) -> None:
+        created = self.client.post('/api/jobs', json={'params': {'message': 'ops dashboard'}}, headers=self._auth_headers())
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()['id']
+
+        from common import db
+
+        db.update_job(job_id, state='completed', result='success', stage='done', finished_at='2026-01-01T00:00:04+00:00')
+        db.add_event(job_id, 'job.state', {'state': 'logging_in', 'attempt': 1, 'stage': 'logging_in'})
+        db.add_event(job_id, 'job.state', {'state': 'reading_spool', 'attempt': 1, 'stage': 'reading_spool'})
+
+        response = self.client.get('/api/ops/dashboard')
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn('health', payload)
+        self.assertIn('stage_metrics', payload)
+        self.assertIn('status', payload['health'])
 
 
 if __name__ == '__main__':
