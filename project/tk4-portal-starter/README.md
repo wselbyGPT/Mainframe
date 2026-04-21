@@ -23,6 +23,9 @@ This starter bundle exposes a small FastAPI API plus a polling worker that can e
 - best-effort TSO logon flow
 - best-effort JCL submission via TSO line-mode EDIT
 - best-effort `STATUS` polling and `OUTPUT` capture
+- deterministic stage retry policy for real `DRY_RUN=0` flows
+- stronger TK4 screen recognizers (TSO context, auth failures, dataset diagnostics)
+- richer failure taxonomy in `job.error` payloads with remediation guidance
 - spool normalization into JES / JCL / SYSOUT sections
 
 ### Canonical stage model
@@ -133,6 +136,14 @@ Unknown template IDs return:
 This bundle was not live-tested against your specific TK4 image. The real worker path is designed to fail with a very explicit stage name and captured screen text if the host presents a different logon screen or command flow than expected.
 
 The code assumes a private tn3270 listener, usually `127.0.0.1:3270`, and a line-mode TSO workflow.
+
+### Real-flow reliability behavior (`DRY_RUN=0`)
+
+Real flows remain image-dependent, but the worker now hardens failure handling:
+
+- retries are deterministic and stage-scoped (`logging_in`, `writing_jcl`, `waiting_for_completion`, `reading_spool`, etc.)
+- recognizers now detect additional TK4 variants such as explicit auth rejection and broader READY/INPUT prompts
+- `job.error` includes `code`, `category`, `retryable`, and `remediation[]` so operators can triage without digging through worker logs
 
 ## Environment
 
