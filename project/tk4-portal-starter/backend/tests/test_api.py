@@ -187,6 +187,32 @@ class TemplateApiTests(unittest.TestCase):
         self.assertIn('stage_metrics', payload)
         self.assertIn('status', payload['health'])
 
+    def test_ops_metrics_reports_spool_parser_counters(self) -> None:
+        from common import db
+
+        created = self.client.post('/api/jobs', json={'params': {'message': 'metrics'}}, headers=self._auth_headers())
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()['id']
+        db.update_job(job_id, state='failed', result='error', stage='unexpected')
+        db.replace_spool_sections(
+            job_id,
+            [
+                {'section_type': 'jes', 'ordinal': 1, 'content_text': 'STEP1 RC=0008'},
+                {'section_type': 'sysout', 'ordinal': 2, 'content_text': 'ABEND=S0C7'},
+            ],
+        )
+
+        response = self.client.get('/api/ops/metrics')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('text/plain', response.headers['content-type'])
+        body = response.text
+        self.assertIn('tk4_jobs_total', body)
+        self.assertIn('tk4_jobs_failed_total', body)
+        self.assertIn('tk4_spool_sections_total{section_type="jes"} 1', body)
+        self.assertIn('tk4_spool_lines_total{section_type="sysout"} 1', body)
+        self.assertIn('tk4_spool_nonzero_rc_sections_total 1', body)
+        self.assertIn('tk4_spool_abend_sections_total 1', body)
+
 
 if __name__ == '__main__':
     unittest.main()
