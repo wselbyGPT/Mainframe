@@ -28,6 +28,7 @@ from common.db import (
 )
 from common.config import settings
 from common.observability import get_logger, parse_iso8601, setup_logging
+from common.spool_parser import summarize_sections
 from common.template_schemas import (
     TemplateSchemaError,
     UnknownTemplateError,
@@ -110,6 +111,38 @@ def ops_dashboard() -> dict[str, Any]:
         'stage_metrics': stage_stats,
         'generated_at': _iso_now(),
     }
+
+
+@app.get('/api/ops/metrics')
+def ops_metrics() -> PlainTextResponse:
+    jobs_payload = list_jobs()
+    terminal = [job for job in jobs_payload if job.get('state') in _TERMINAL_STATES]
+    failing = [job for job in terminal if job.get('state') in {'failed', 'canceled'}]
+
+    spool_type_totals: dict[str, dict[str, int]] = {}
+    spool_rc_nonzero_total = 0
+    spool_abend_total = 0
+    for job in jobs_payload:
+        sections = get_spool_sections(job['id'])
+        if not sections:
+            continue
+        summary = summarize_sections(sections)
+        spool_rc_nonzero_total += int(summary.get('nonzero_rc_sections', 0))
+        spool_abend_total += int(summary.get('abend_sections', 0))
+        for section_type, item in (summary.get('section_types') or {}).items():
+            current = spool_type_totals.setdefault(str(section_type), {'sections': 0, 'lines': 0})
+            current['sections'] += int(item.get('sections', 0))
+            current['lines'] += int(item.get('lines', 0))
+
+    body = _render_metrics(
+        jobs_total=len(jobs_payload),
+        jobs_terminal_total=len(terminal),
+        jobs_failed_total=len(failing),
+        spool_type_totals=spool_type_totals,
+        spool_rc_nonzero_total=spool_rc_nonzero_total,
+        spool_abend_total=spool_abend_total,
+    )
+    return PlainTextResponse(content=body, media_type='text/plain; version=0.0.4')
 
 
 @app.get('/')
@@ -367,6 +400,48 @@ def _build_artifact_links(job: dict[str, Any]) -> dict[str, Any]:
             'sysout': f'/api/jobs/{job_id}/spool/sysout',
         },
     }
+
+
+def _render_metrics(
+    jobs_total: int,
+    jobs_terminal_total: int,
+    jobs_failed_total: int,
+    spool_type_totals: dict[str, dict[str, int]],
+    spool_rc_nonzero_total: int,
+    spool_abend_total: int,
+) -> str:
+    lines = [
+        '# HELP tk4_jobs_total Total jobs persisted in the portal database.',
+        '# TYPE tk4_jobs_total gauge',
+        f'tk4_jobs_total {jobs_total}',
+        '# HELP tk4_jobs_terminal_total Total jobs currently in terminal states.',
+        '# TYPE tk4_jobs_terminal_total gauge',
+        f'tk4_jobs_terminal_total {jobs_terminal_total}',
+        '# HELP tk4_jobs_failed_total Total terminal jobs in failed or canceled state.',
+        '# TYPE tk4_jobs_failed_total gauge',
+        f'tk4_jobs_failed_total {jobs_failed_total}',
+        '# HELP tk4_spool_nonzero_rc_sections_total Spool sections containing RC values other than 0000.',
+        '# TYPE tk4_spool_nonzero_rc_sections_total counter',
+        f'tk4_spool_nonzero_rc_sections_total {spool_rc_nonzero_total}',
+        '# HELP tk4_spool_abend_sections_total Spool sections containing ABEND signatures.',
+        '# TYPE tk4_spool_abend_sections_total counter',
+        f'tk4_spool_abend_sections_total {spool_abend_total}',
+        '# HELP tk4_spool_sections_total Spool sections partitioned by section type.',
+        '# TYPE tk4_spool_sections_total gauge',
+    ]
+    for section_type in sorted(spool_type_totals):
+        metrics = spool_type_totals[section_type]
+        lines.append(f'tk4_spool_sections_total{{section_type="{section_type}"}} {metrics["sections"]}')
+    lines.extend(
+        [
+            '# HELP tk4_spool_lines_total Total lines captured in spool sections by section type.',
+            '# TYPE tk4_spool_lines_total gauge',
+        ]
+    )
+    for section_type in sorted(spool_type_totals):
+        metrics = spool_type_totals[section_type]
+        lines.append(f'tk4_spool_lines_total{{section_type="{section_type}"}} {metrics["lines"]}')
+    return '\n'.join(lines) + '\n'
 
 
 def _require_auth_principal(authorization: str | None) -> dict[str, str]:
