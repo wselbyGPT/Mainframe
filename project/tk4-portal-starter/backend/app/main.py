@@ -36,6 +36,7 @@ _SSE_KEEPALIVE_SECONDS = 15.0
 _SSE_MAX_BATCH_SIZE = 100
 _SSE_BACKLOG_LIMIT = 200
 _TERMINAL_STATES = {'completed', 'failed', 'canceled'}
+_CANONICAL_STAGE_ORDER = ['queued', 'connecting', 'logon', 'submit', 'poll', 'capture', 'done', 'failed']
 
 
 class CreateJobRequest(BaseModel):
@@ -111,7 +112,22 @@ def get_spool_section_route(job_id: str, section_type: str) -> dict[str, Any]:
 def _build_job_payload(job: dict[str, Any]) -> dict[str, Any]:
     payload = dict(job)
     events = get_job_events(job['id'])
+    normalized_params = json.loads(payload.get('input_params_json') or '{}')
+    stage_timeline = _build_stage_timeline(payload, events)
     payload['events'] = events
+    payload['normalized_params'] = normalized_params
+    payload['timestamps'] = {
+        'created_at': payload.get('created_at'),
+        'started_at': payload.get('started_at'),
+        'finished_at': payload.get('finished_at'),
+        'updated_at': payload.get('updated_at'),
+    }
+    payload['stage_model'] = {
+        'current': _canonical_stage(payload.get('stage'), payload.get('state')),
+        'ordered_stages': list(_CANONICAL_STAGE_ORDER),
+        'timeline': stage_timeline,
+    }
+    payload['artifact_links'] = _build_artifact_links(payload)
     payload['event_summary'] = {
         'count': len(events),
         'last_event': events[-1]['event_type'] if events else None,
@@ -122,6 +138,72 @@ def _build_job_payload(job: dict[str, Any]) -> dict[str, Any]:
         'retry_of_job_id': payload.get('retry_of_job_id'),
     }
     return payload
+
+
+def _canonical_stage(stage: str | None, state: str | None) -> str:
+    stage_value = (stage or '').strip().lower()
+    state_value = (state or '').strip().lower()
+    if stage_value in {'', 'none'}:
+        if state_value in {'queued'}:
+            return 'queued'
+        if state_value in {'starting', 'submitted', 'running'}:
+            return 'connecting'
+        if state_value in {'completed'}:
+            return 'done'
+        if state_value in {'failed', 'canceled'}:
+            return 'failed'
+        return 'queued'
+
+    mapping = {
+        'queued': 'queued',
+        'starting': 'connecting',
+        'logging_in': 'logon',
+        'cleanup_dataset': 'submit',
+        'allocate_dataset': 'submit',
+        'writing_jcl': 'submit',
+        'submitting': 'submit',
+        'waiting_for_completion': 'poll',
+        'reading_spool': 'capture',
+        'done': 'done',
+        'unexpected': 'failed',
+        'canceled': 'failed',
+    }
+    return mapping.get(stage_value, 'failed')
+
+
+def _build_stage_timeline(job: dict[str, Any], events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    stage_first_seen: dict[str, str] = {'queued': job.get('created_at') or ''}
+    for item in events:
+        payload = item.get('payload') or {}
+        event_state = payload.get('state')
+        event_stage = payload.get('stage')
+        stage_name = _canonical_stage(event_stage, event_state)
+        if stage_name not in stage_first_seen:
+            stage_first_seen[stage_name] = item.get('ts') or ''
+
+    current = _canonical_stage(job.get('stage'), job.get('state'))
+    if current in {'failed'} and stage_first_seen.get('failed') in {None, ''}:
+        stage_first_seen['failed'] = job.get('finished_at') or job.get('updated_at') or ''
+    if current in {'done'} and stage_first_seen.get('done') in {None, ''}:
+        stage_first_seen['done'] = job.get('finished_at') or job.get('updated_at') or ''
+
+    out: list[dict[str, Any]] = []
+    for stage_name in _CANONICAL_STAGE_ORDER:
+        if stage_name in stage_first_seen and stage_first_seen[stage_name]:
+            out.append({'stage': stage_name, 'first_seen_at': stage_first_seen[stage_name]})
+    return out
+
+
+def _build_artifact_links(job: dict[str, Any]) -> dict[str, Any]:
+    job_id = job['id']
+    return {
+        'spool': f'/api/jobs/{job_id}/spool',
+        'spool_sections': {
+            'jes': f'/api/jobs/{job_id}/spool/jes',
+            'jcl': f'/api/jobs/{job_id}/spool/jcl',
+            'sysout': f'/api/jobs/{job_id}/spool/sysout',
+        },
+    }
 
 
 def _apply_transition(job_id: str, transition_fn: Any) -> dict[str, Any]:
@@ -154,6 +236,7 @@ def _to_sse_frame(event_id: int, event_type: str, payload: dict[str, Any]) -> st
     return f'id: {event_id}\nevent: {event_type}\ndata: {payload_json}\n\n'
 
 
+@app.get('/api/jobs/{job_id}/events')
 @app.get('/api/jobs/{job_id}/events/stream')
 async def stream_job_events_route(
     job_id: str,

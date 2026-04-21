@@ -124,6 +124,16 @@ class JobEventSseApiTests(unittest.TestCase):
         self.assertTrue(all(item_id > first_ids[-1] for item_id in second_ids))
         self.assertEqual(len(set(first_ids) & set(second_ids)), 0)
 
+    def test_events_alias_endpoint_streams_sse(self) -> None:
+        job = db.create_job('hello-world', 'tester', {'message': 'hello'})
+        db.add_event(job['id'], 'job.running', {'state': 'running', 'progress': 10})
+
+        with self.client.stream('GET', f"/api/jobs/{job['id']}/events") as response:
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.headers['content-type'].split(';')[0], 'text/event-stream')
+            events = _read_sse_events(response, target_count=1)
+        self.assertEqual(events[0]['event'], 'job.created')
+
 
 if __name__ == '__main__':
     unittest.main()
