@@ -27,6 +27,7 @@ from common.db import (
     search_spool_sections,
 )
 from common.config import settings
+from common.observability import get_logger, parse_iso8601, setup_logging
 from common.template_schemas import (
     TemplateSchemaError,
     UnknownTemplateError,
@@ -36,6 +37,8 @@ from common.template_schemas import (
 )
 
 app = FastAPI(title='TK4 Portal')
+setup_logging()
+logger = get_logger(__name__)
 _STATIC_DIR = Path(__file__).resolve().parent / 'static'
 app.mount('/static', StaticFiles(directory=str(_STATIC_DIR)), name='static')
 
@@ -68,6 +71,7 @@ class LoginRequest(BaseModel):
 def startup() -> None:
     init_db()
     _start_cleanup_task()
+    logger.info('app.startup')
 
 
 @app.on_event('shutdown')
@@ -80,11 +84,32 @@ async def shutdown() -> None:
         except asyncio.CancelledError:
             pass
         _cleanup_task = None
+    logger.info('app.shutdown')
 
 
 @app.get('/api/healthz')
 def healthz() -> dict[str, str]:
     return {'status': 'ok'}
+
+
+@app.get('/api/ops/dashboard')
+def ops_dashboard() -> dict[str, Any]:
+    jobs_payload = list_jobs()
+    terminal = [job for job in jobs_payload if job.get('state') in _TERMINAL_STATES]
+    failing = [job for job in terminal if job.get('state') in {'failed', 'canceled'}]
+    total = len(jobs_payload)
+    stage_stats = _aggregate_stage_metrics(jobs_payload)
+    return {
+        'health': {
+            'status': 'degraded' if failing else 'ok',
+            'total_jobs': total,
+            'terminal_jobs': len(terminal),
+            'failed_jobs': len(failing),
+            'failure_rate': round((len(failing) / total), 4) if total else 0.0,
+        },
+        'stage_metrics': stage_stats,
+        'generated_at': _iso_now(),
+    }
 
 
 @app.get('/')
@@ -204,6 +229,7 @@ def _build_job_payload(job: dict[str, Any]) -> dict[str, Any]:
         'current': _canonical_stage(payload.get('stage'), payload.get('state')),
         'ordered_stages': list(_CANONICAL_STAGE_ORDER),
         'timeline': stage_timeline,
+        'durations_ms': _build_stage_durations(stage_timeline, payload),
     }
     payload['artifact_links'] = _build_artifact_links(payload)
     payload['event_summary'] = {
@@ -269,6 +295,64 @@ def _build_stage_timeline(job: dict[str, Any], events: list[dict[str, Any]]) -> 
     for stage_name in _CANONICAL_STAGE_ORDER:
         if stage_name in stage_first_seen and stage_first_seen[stage_name]:
             out.append({'stage': stage_name, 'first_seen_at': stage_first_seen[stage_name]})
+    return out
+
+
+def _iso_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _build_stage_durations(timeline: list[dict[str, Any]], job: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for index, item in enumerate(timeline):
+        start_at = item.get('first_seen_at')
+        if index + 1 < len(timeline):
+            end_at = timeline[index + 1].get('first_seen_at')
+        else:
+            end_at = job.get('finished_at') or job.get('updated_at')
+        duration = _duration_ms(start_at, end_at)
+        out.append({'stage': item.get('stage'), 'duration_ms': duration, 'start_at': start_at, 'end_at': end_at})
+    return out
+
+
+def _duration_ms(start_at: str | None, end_at: str | None) -> int | None:
+    start_dt = parse_iso8601(start_at)
+    end_dt = parse_iso8601(end_at)
+    if not start_dt or not end_dt:
+        return None
+    value = int((end_dt - start_dt).total_seconds() * 1000)
+    return value if value >= 0 else None
+
+
+def _aggregate_stage_metrics(jobs_payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    aggregate: dict[str, list[int]] = {}
+    for job in jobs_payload:
+        payload = _build_job_payload(job)
+        for item in payload.get('stage_model', {}).get('durations_ms', []):
+            stage = item.get('stage')
+            duration = item.get('duration_ms')
+            if not stage or duration is None:
+                continue
+            aggregate.setdefault(stage, []).append(int(duration))
+
+    out: list[dict[str, Any]] = []
+    for stage in _CANONICAL_STAGE_ORDER:
+        durations = aggregate.get(stage, [])
+        if not durations:
+            continue
+        durations_sorted = sorted(durations)
+        p95_index = max(0, int(len(durations_sorted) * 0.95) - 1)
+        out.append(
+            {
+                'stage': stage,
+                'samples': len(durations_sorted),
+                'avg_ms': int(sum(durations_sorted) / len(durations_sorted)),
+                'p95_ms': durations_sorted[p95_index],
+                'max_ms': durations_sorted[-1],
+            }
+        )
     return out
 
 
