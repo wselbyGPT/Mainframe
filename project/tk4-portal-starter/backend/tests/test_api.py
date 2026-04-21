@@ -39,6 +39,12 @@ class TemplateApiTests(unittest.TestCase):
         hello_world = next(item for item in payload['templates'] if item['template_id'] == 'hello-world')
         self.assertEqual(hello_world['params']['job_name']['default'], 'HELLO1')
 
+    def test_index_serves_web_ui(self) -> None:
+        response = self.client.get('/')
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('text/html', response.headers['content-type'])
+        self.assertIn('TK4 Portal', response.text)
+
     def test_get_template_details(self) -> None:
         response = self.client.get('/api/templates/hello-world')
         self.assertEqual(response.status_code, 200)
