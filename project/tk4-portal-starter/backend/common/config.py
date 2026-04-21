@@ -35,6 +35,9 @@ class Settings:
     job_poll_attempts: int = _get_int("JOB_POLL_ATTEMPTS", 15)
     s3270_bin: str = os.getenv("S3270_BIN", "s3270")
     s3270_model: str = os.getenv("S3270_MODEL", "2")
+    spool_retention_days: int = _get_int("SPOOL_RETENTION_DAYS", 14)
+    cleanup_interval_seconds: int = _get_int("CLEANUP_INTERVAL_SECONDS", 300)
+    cleanup_batch_size: int = _get_int("CLEANUP_BATCH_SIZE", 100)
 
 
 settings = Settings()

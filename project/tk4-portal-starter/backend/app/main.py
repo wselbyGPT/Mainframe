@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from common.db import (
     JobTransitionError,
     cancel_job,
+    cleanup_old_jobs,
     create_job,
     get_job,
     get_job_events,
@@ -23,7 +24,9 @@ from common.db import (
     list_jobs,
     requeue_job,
     retry_job,
+    search_spool_sections,
 )
+from common.config import settings
 from common.template_schemas import (
     TemplateSchemaError,
     UnknownTemplateError,
@@ -48,6 +51,7 @@ _USERS = {
     'admin': {'password': 'admin-pass', 'role': 'admin'},
 }
 _TOKENS: dict[str, dict[str, str]] = {}
+_cleanup_task: asyncio.Task[Any] | None = None
 
 
 class CreateJobRequest(BaseModel):
@@ -63,6 +67,19 @@ class LoginRequest(BaseModel):
 @app.on_event('startup')
 def startup() -> None:
     init_db()
+    _start_cleanup_task()
+
+
+@app.on_event('shutdown')
+async def shutdown() -> None:
+    global _cleanup_task
+    if _cleanup_task:
+        _cleanup_task.cancel()
+        try:
+            await _cleanup_task
+        except asyncio.CancelledError:
+            pass
+        _cleanup_task = None
 
 
 @app.get('/api/healthz')
@@ -122,22 +139,52 @@ def get_job_route(job_id: str) -> dict[str, Any]:
 
 
 @app.get('/api/jobs/{job_id}/spool')
-def get_spool_route(job_id: str) -> dict[str, Any]:
+def get_spool_route(
+    job_id: str,
+    query: str | None = Query(default=None),
+    section_type: str | None = Query(default=None),
+) -> dict[str, Any]:
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail={'code': 'job_not_found', 'message': 'Job not found'})
-    return {'job_id': job_id, 'sections': get_spool_sections(job_id)}
+    sections = search_spool_sections(job_id, query=query, section_type=section_type)
+    return {'job_id': job_id, 'query': query, 'section_type': section_type, 'sections': sections}
 
 
 @app.get('/api/jobs/{job_id}/spool/{section_type}')
-def get_spool_section_route(job_id: str, section_type: str) -> dict[str, Any]:
+def get_spool_section_route(job_id: str, section_type: str, query: str | None = Query(default=None)) -> dict[str, Any]:
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail={'code': 'job_not_found', 'message': 'Job not found'})
-    sections = [s for s in get_spool_sections(job_id) if s['section_type'] == section_type]
+    sections = search_spool_sections(job_id, query=query, section_type=section_type)
     if not sections:
         raise HTTPException(status_code=404, detail='Spool section not found')
-    return {'job_id': job_id, 'section_type': section_type, 'content': '\n\n'.join(s['content_text'] for s in sections)}
+    return {
+        'job_id': job_id,
+        'section_type': section_type,
+        'query': query,
+        'content': '\n\n'.join(s['content_text'] for s in sections),
+    }
+
+
+@app.get('/api/jobs/{job_id}/spool/text')
+def get_spool_as_text_route(
+    job_id: str,
+    section_type: str | None = Query(default=None),
+    query: str | None = Query(default=None),
+) -> PlainTextResponse:
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail={'code': 'job_not_found', 'message': 'Job not found'})
+    sections = search_spool_sections(job_id, query=query, section_type=section_type)
+    if not sections:
+        raise HTTPException(status_code=404, detail='Spool content not found')
+    text = '\n\n'.join(
+        f"===== {item['section_type'].upper()} #{item['ordinal']} =====\n{item['content_text']}" for item in sections
+    )
+    filename_suffix = section_type.strip().lower() if section_type else 'all'
+    headers = {'Content-Disposition': f'attachment; filename="{job_id}-{filename_suffix}.txt"'}
+    return PlainTextResponse(content=text, headers=headers)
 
 
 def _build_job_payload(job: dict[str, Any]) -> dict[str, Any]:
@@ -229,6 +276,7 @@ def _build_artifact_links(job: dict[str, Any]) -> dict[str, Any]:
     job_id = job['id']
     return {
         'spool': f'/api/jobs/{job_id}/spool',
+        'spool_text': f'/api/jobs/{job_id}/spool/text',
         'spool_sections': {
             'jes': f'/api/jobs/{job_id}/spool/jes',
             'jcl': f'/api/jobs/{job_id}/spool/jcl',
@@ -360,3 +408,17 @@ async def stream_job_events_route(
         'X-Accel-Buffering': 'no',
     }
     return StreamingResponse(_event_stream(), media_type='text/event-stream', headers=headers)
+
+
+def _start_cleanup_task() -> None:
+    global _cleanup_task
+    if settings.cleanup_interval_seconds <= 0:
+        return
+    loop = asyncio.get_event_loop()
+    _cleanup_task = loop.create_task(_cleanup_loop())
+
+
+async def _cleanup_loop() -> None:
+    while True:
+        await asyncio.sleep(settings.cleanup_interval_seconds)
+        cleanup_old_jobs(settings.spool_retention_days, limit=settings.cleanup_batch_size)

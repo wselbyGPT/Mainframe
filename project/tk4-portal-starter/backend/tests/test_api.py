@@ -136,7 +136,34 @@ class TemplateApiTests(unittest.TestCase):
         self.assertEqual(payload['stage_model']['current'], 'queued')
         self.assertEqual(payload['stage_model']['timeline'][0]['stage'], 'queued')
         self.assertEqual(payload['artifact_links']['spool'], f'/api/jobs/{job_id}/spool')
+        self.assertEqual(payload['artifact_links']['spool_text'], f'/api/jobs/{job_id}/spool/text')
         self.assertIn('jes', payload['artifact_links']['spool_sections'])
+
+    def test_spool_endpoints_support_search_and_text_download(self) -> None:
+        from common import db
+
+        created = self.client.post('/api/jobs', json={'params': {'message': 'spool test'}}, headers=self._auth_headers())
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()['id']
+        db.replace_spool_sections(
+            job_id,
+            [
+                {'section_type': 'jes', 'ordinal': 1, 'content_text': 'JOB COMPLETED - RC=0000'},
+                {'section_type': 'sysout', 'ordinal': 2, 'content_text': 'HELLO WORLD'},
+            ],
+        )
+
+        filtered = self.client.get(f'/api/jobs/{job_id}/spool', params={'query': 'rc=0000', 'section_type': 'jes'})
+        self.assertEqual(filtered.status_code, 200)
+        payload = filtered.json()
+        self.assertEqual(len(payload['sections']), 1)
+        self.assertEqual(payload['sections'][0]['section_type'], 'jes')
+
+        download = self.client.get(f'/api/jobs/{job_id}/spool/text', params={'query': 'hello'})
+        self.assertEqual(download.status_code, 200)
+        self.assertIn('text/plain', download.headers['content-type'])
+        self.assertIn('attachment; filename=', download.headers['content-disposition'])
+        self.assertIn('HELLO WORLD', download.text)
 
 
 if __name__ == '__main__':
