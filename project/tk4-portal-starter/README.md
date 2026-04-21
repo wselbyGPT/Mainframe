@@ -54,6 +54,7 @@ Current templates:
 - `idcams-listcat` (requires `level`, default `job_name=LISTCAT`)
 - `iebgener-copy` (requires `input_dataset`, `output_dataset`, default `job_name=IEBGEN`)
 - `sort-basic` (requires `input_dataset`, `output_dataset`, default `job_name=SORTJOB`, default `sort_fields=1,10,CH,A`)
+- `lattice-crypto-demo` (requires `key_dataset`, defaults: `job_name=LATTICE`, `algorithm=CRYSTALS-KYBER`, `security_level=LEVEL1`)
 
 ### Validation behavior
 

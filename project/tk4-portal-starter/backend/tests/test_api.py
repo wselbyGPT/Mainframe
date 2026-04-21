@@ -41,7 +41,10 @@ class TemplateApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         template_ids = {item['template_id'] for item in payload['templates']}
-        self.assertEqual(template_ids, {'hello-world', 'idcams-listcat', 'iebgener-copy', 'sort-basic'})
+        self.assertEqual(
+            template_ids,
+            {'hello-world', 'idcams-listcat', 'iebgener-copy', 'sort-basic', 'lattice-crypto-demo'},
+        )
         hello_world = next(item for item in payload['templates'] if item['template_id'] == 'hello-world')
         self.assertEqual(hello_world['params']['job_name']['default'], 'HELLO1')
 
