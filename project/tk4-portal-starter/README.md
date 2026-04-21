@@ -135,6 +135,25 @@ Unknown template IDs return:
 }
 ```
 
+
+## JCL linting gate (starter rules)
+
+A lightweight lint gate is included for template-generated JCL (`backend/common/jcl_lint.py`) and is enforced by unit tests (`backend/tests/test_jcl_lint.py`).
+
+Starter rules:
+
+- max 80 columns per line
+- no tab characters
+- first non-empty statement must be a JOB card
+- JCL statement card names must match `A-Z0-9#$@` with 1-8 chars
+
+Run the gate with:
+
+```bash
+cd backend
+python -m unittest -v tests/test_jcl_lint.py
+```
+
 ## Important limitations
 
 This bundle was not live-tested against your specific TK4 image. The real worker path is designed to fail with a very explicit stage name and captured screen text if the host presents a different logon screen or command flow than expected.
