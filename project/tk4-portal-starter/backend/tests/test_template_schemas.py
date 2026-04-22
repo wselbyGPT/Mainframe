@@ -7,6 +7,7 @@ from common.template_schemas import (
     get_template_catalog,
     get_template_schema,
     normalize_and_validate_template_params,
+    validate_template_pack_structure,
 )
 
 
@@ -55,11 +56,62 @@ class TemplateSchemaDiscoveryTests(unittest.TestCase):
             {'hello-world', 'idcams-listcat', 'iebgener-copy', 'sort-basic', 'lattice-crypto-demo'},
         )
 
+    def test_catalog_grouped_pack_discovery(self) -> None:
+        packs = get_template_catalog(grouped=True, include_pack_metadata=True)
+        self.assertEqual(len(packs), 1)
+        pack = packs[0]
+        self.assertEqual(pack['operations_pack_id'], 'ops-core')
+        template_ids = {item['template_id'] for item in pack['templates']}
+        self.assertIn('hello-world', template_ids)
+        self.assertIn('compatibility', pack)
+
     def test_get_single_template_schema(self) -> None:
         schema = get_template_schema('sort-basic')
         self.assertEqual(schema['template_id'], 'sort-basic')
         self.assertIn('sort_fields', schema['params'])
         self.assertEqual(schema['params']['sort_fields']['default'], '1,10,CH,A')
+
+    def test_template_schema_can_include_pack_metadata(self) -> None:
+        schema = get_template_schema('sort-basic', include_pack_metadata=True)
+        self.assertEqual(schema['operations_pack']['operations_pack_id'], 'ops-core')
+        self.assertIn('target_profiles', schema['compatibility'])
+
+    def test_inherited_defaults_and_template_override(self) -> None:
+        hello = get_template_schema('hello-world')
+        self.assertEqual(hello['params']['job_name']['format'], 'jcl_job_name')
+        self.assertEqual(hello['params']['job_name']['default'], 'HELLO1')
+
+    def test_nested_pack_template_validation_errors(self) -> None:
+        invalid_catalog = [
+            {
+                'operations_pack_id': 'ops-invalid',
+                'version': '0.1.0',
+                'description': 'broken',
+                'params': {
+                    'job_name': {'type': 'string', 'required': False},
+                },
+                'templates': [
+                    {
+                        'template_id': 'bad-template',
+                        'description': 'broken template',
+                        'params': {
+                            'job_name': 'not-a-dict',
+                        },
+                    }
+                ],
+            }
+        ]
+        with self.assertRaises(TemplateSchemaError) as exc:
+            validate_template_pack_structure(invalid_catalog)
+        self.assertEqual(exc.exception.code, 'template_catalog_invalid')
+        self.assertEqual(exc.exception.errors[0]['path'], 'packs[0].templates[0].params.job_name')
+
+    def test_backward_compatible_flat_catalog_shape(self) -> None:
+        schema = get_template_catalog()[0]
+        self.assertIn('template_id', schema)
+        self.assertIn('description', schema)
+        self.assertIn('params', schema)
+        self.assertNotIn('operations_pack', schema)
 
 
 if __name__ == '__main__':
