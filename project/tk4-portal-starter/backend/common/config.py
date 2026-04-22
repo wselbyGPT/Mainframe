@@ -55,6 +55,7 @@ class Settings:
     spool_retention_days: int = _get_int("SPOOL_RETENTION_DAYS", 14)
     cleanup_interval_seconds: int = _get_int("CLEANUP_INTERVAL_SECONDS", 300)
     cleanup_batch_size: int = _get_int("CLEANUP_BATCH_SIZE", 100)
+    worker_adapter_profile: str = os.getenv("WORKER_ADAPTER_PROFILE", "tk4_default")
     auth_secret_key: str = os.getenv('AUTH_SECRET_KEY', 'dev-only-change-me')
     auth_issuer: str = os.getenv('AUTH_ISSUER', 'tk4-portal')
     auth_audience: str = os.getenv('AUTH_AUDIENCE', 'tk4-portal-api')

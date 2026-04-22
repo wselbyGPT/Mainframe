@@ -352,13 +352,16 @@ def add_event(job_id: str, event_type: str, payload: dict[str, Any], attempt: in
     with _LOCK:
         conn = connect()
         try:
+            stored_payload = dict(payload)
+            if event_type.startswith('job.') and 'profile' not in stored_payload:
+                stored_payload['profile'] = settings.worker_adapter_profile
             event_attempt = attempt
             if event_attempt is None:
                 row = conn.execute('SELECT attempt FROM jobs WHERE id = ?', (job_id,)).fetchone()
                 event_attempt = int(row['attempt']) if row else 1
             conn.execute(
                 'INSERT INTO job_events (job_id, attempt, ts, event_type, payload_json) VALUES (?, ?, ?, ?, ?)',
-                (job_id, int(event_attempt), _utcnow(), event_type, json.dumps(payload)),
+                (job_id, int(event_attempt), _utcnow(), event_type, json.dumps(stored_payload)),
             )
             conn.commit()
         finally:
