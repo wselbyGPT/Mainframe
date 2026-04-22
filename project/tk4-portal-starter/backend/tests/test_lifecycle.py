@@ -90,6 +90,25 @@ class LifecycleDbTransitionTests(unittest.TestCase):
         self.assertEqual(cleanup['jobs_deleted'], 1)
         self.assertEqual(db.get_job(job['id']), None)
 
+    def test_idempotent_queue_transition_to_reserved(self) -> None:
+        job = db.create_job('hello-world', 'tester', {'message': 'hello'})
+        first = db.transition_job_state(
+            job['id'],
+            to_state='reserved',
+            from_states={'queued'},
+            extra_fields={'lease_owner': 'worker-1'},
+        )
+        self.assertIsNotNone(first)
+        second = db.transition_job_state(
+            job['id'],
+            to_state='reserved',
+            from_states={'queued'},
+            extra_fields={'lease_owner': 'worker-1'},
+            idempotent=True,
+        )
+        self.assertIsNotNone(second)
+        self.assertEqual(second['state'], 'reserved')
+
 
 @unittest.skipIf(TestClient is None, 'fastapi is not installed in this execution environment')
 class LifecycleApiTests(unittest.TestCase):
