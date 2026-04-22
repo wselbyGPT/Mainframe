@@ -61,6 +61,13 @@ class TemplateValidationTests(unittest.TestCase):
         self.assertIn('params', hello)
         self.assertNotIn('operations_pack', hello)
 
+    def test_catalog_can_include_pack_metadata(self) -> None:
+        catalog = get_template_catalog(include_pack_metadata=True)
+        hello = next(item for item in catalog if item['template_id'] == 'hello-world')
+        self.assertIn('operations_pack', hello)
+        self.assertIn('template_param_overrides', hello)
+        self.assertIn('template', hello['compatibility'])
+
 
 if __name__ == '__main__':
     unittest.main()

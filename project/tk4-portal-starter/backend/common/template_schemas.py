@@ -308,10 +308,13 @@ def _flatten_template_packs(template_packs: list[dict[str, Any]]) -> tuple[dict[
             flattened[template_id] = {
                 'description': template['description'],
                 'params': merged_params,
+                'template_param_overrides': deepcopy(template.get('params', {})),
                 'pack': {
                     'operations_pack_id': pack['operations_pack_id'],
                     'version': pack['version'],
                     'description': pack['description'],
+                    'params': deepcopy(pack_params),
+                    'compatibility': deepcopy(pack_compat),
                 },
                 'compatibility': deepcopy(template.get('compatibility', pack_compat)),
             }
@@ -407,7 +410,11 @@ def get_template_schema(template_id: str, include_pack_metadata: bool = False) -
     }
     if include_pack_metadata:
         payload['operations_pack'] = deepcopy(spec['pack'])
-        payload['compatibility'] = deepcopy(spec.get('compatibility', {}))
+        payload['template_param_overrides'] = deepcopy(spec.get('template_param_overrides', {}))
+        payload['compatibility'] = {
+            'pack': deepcopy(spec['pack'].get('compatibility', {})),
+            'template': deepcopy(spec.get('compatibility', {})),
+        }
     return payload
 
 
@@ -422,6 +429,7 @@ def get_template_catalog(
                 'operations_pack_id': pack['operations_pack_id'],
                 'version': pack['version'],
                 'description': pack['description'],
+                'params': deepcopy(pack.get('params', {})),
                 'compatibility': deepcopy(pack.get('compatibility', {})),
                 'templates': [
                     get_template_schema(item['template_id'], include_pack_metadata=include_pack_metadata)
