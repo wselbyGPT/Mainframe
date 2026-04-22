@@ -265,6 +265,30 @@ class TemplateApiTests(unittest.TestCase):
         self.assertIn('stage_metrics', payload)
         self.assertIn('status', payload['health'])
 
+
+    def test_ops_slo_endpoints_expose_objectives(self) -> None:
+        created = self.client.post('/api/jobs', json={'params': {'message': 'slo'}}, headers=self._auth_headers())
+        self.assertEqual(created.status_code, 200)
+        job_id = created.json()['id']
+
+        from common import db
+
+        db.update_job(job_id, state='completed', result='success', stage='done', finished_at='2026-01-01T00:01:00+00:00')
+
+        collection = self.client.get('/api/ops/slo')
+        self.assertEqual(collection.status_code, 200)
+        payload = collection.json()
+        self.assertIn('objectives', payload)
+        self.assertTrue(any(item['objective_id'] == 'availability' for item in payload['objectives']))
+
+        detail = self.client.get('/api/ops/slo/availability')
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()['objective_id'], 'availability')
+
+        missing = self.client.get('/api/ops/slo/not-a-real-objective')
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(missing.json()['detail']['code'], 'slo_objective_not_found')
+
     def test_ops_metrics_reports_spool_parser_counters(self) -> None:
         from common import db
 
@@ -290,6 +314,8 @@ class TemplateApiTests(unittest.TestCase):
         self.assertIn('tk4_spool_lines_total{section_type="sysout"} 1', body)
         self.assertIn('tk4_spool_nonzero_rc_sections_total 1', body)
         self.assertIn('tk4_spool_abend_sections_total 1', body)
+        self.assertIn('tk4_slo_objective_status{objective_id="availability"', body)
+        self.assertIn('tk4_slo_burn_rate{objective_id="availability",window="short"}', body)
 
 
 if __name__ == '__main__':
