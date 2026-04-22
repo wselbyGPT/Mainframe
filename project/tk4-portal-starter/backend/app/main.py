@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
-import secrets
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -11,20 +15,30 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from common.auth_provider import IdentityProviderAdapter, LocalIdentityProvider
 from common.db import (
     JobTransitionError,
+    create_refresh_session,
     cancel_job,
     cleanup_old_jobs,
     create_job,
+    ensure_identity,
     get_job,
     get_job_events,
     get_job_events_since,
+    get_refresh_session_by_jti,
+    get_user_by_username,
     get_spool_sections,
     init_db,
+    is_token_revoked,
     list_jobs,
     requeue_job,
+    revoke_refresh_session,
+    revoke_token,
+    rotate_refresh_session,
     retry_job,
     search_spool_sections,
+    upsert_user,
 )
 from common.config import settings
 from common.observability import get_logger, parse_iso8601, setup_logging
@@ -49,13 +63,8 @@ _SSE_MAX_BATCH_SIZE = 100
 _SSE_BACKLOG_LIMIT = 200
 _TERMINAL_STATES = {'completed', 'failed', 'canceled'}
 _CANONICAL_STAGE_ORDER = ['queued', 'connecting', 'logon', 'submit', 'poll', 'capture', 'done', 'failed']
-_USERS = {
-    'alice': {'password': 'alice-pass', 'role': 'submitter'},
-    'bob': {'password': 'bob-pass', 'role': 'submitter'},
-    'admin': {'password': 'admin-pass', 'role': 'admin'},
-}
-_TOKENS: dict[str, dict[str, str]] = {}
 _cleanup_task: asyncio.Task[Any] | None = None
+_IDENTITY_PROVIDER: IdentityProviderAdapter = LocalIdentityProvider(settings.auth_default_users)
 
 
 class CreateJobRequest(BaseModel):
@@ -68,9 +77,14 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
 @app.on_event('startup')
 def startup() -> None:
     init_db()
+    _seed_auth_storage()
     _start_cleanup_task()
     logger.info('app.startup')
 
@@ -171,12 +185,96 @@ def template_details(template_id: str, include_pack_metadata: bool = Query(defau
 
 @app.post('/api/login')
 def login_route(request: LoginRequest) -> dict[str, str]:
-    user = _USERS.get(request.username)
-    if not user or user['password'] != request.password:
+    principal = _IDENTITY_PROVIDER.authenticate(request.username, request.password)
+    if not principal:
         raise HTTPException(status_code=401, detail={'code': 'invalid_credentials', 'message': 'Invalid credentials'})
-    token = secrets.token_urlsafe(24)
-    _TOKENS[token] = {'username': request.username, 'role': user['role']}
-    return {'access_token': token, 'token_type': 'Bearer', 'username': request.username, 'role': user['role']}
+    user = get_user_by_username(principal.subject)
+    if not user:
+        raise HTTPException(status_code=500, detail={'code': 'auth_user_missing', 'message': 'Auth user not initialized'})
+    issued_at = _utcnow_dt()
+    access_token = _mint_access_token(user, issued_at=issued_at)
+    refresh_token = _mint_refresh_token(user, issued_at=issued_at)
+    return {
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'token_type': 'Bearer',
+        'username': principal.subject,
+        'role': principal.role,
+    }
+
+
+@app.post('/api/refresh')
+def refresh_route(request: RefreshRequest) -> dict[str, str]:
+    payload = _decode_and_validate_jwt(request.refresh_token, expected_token_type='refresh')
+    session = get_refresh_session_by_jti(str(payload['jti']))
+    if not session or session.get('revoked_at'):
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Refresh session revoked'})
+
+    expires_at = _parse_iso_datetime(str(session['expires_at']))
+    if expires_at <= _utcnow_dt():
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Refresh session expired'})
+
+    user = get_user_by_username(str(payload['sub']))
+    if not user:
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Refresh user not found'})
+
+    now = _utcnow_dt()
+    next_refresh_jti = str(uuid.uuid4())
+    revoke_token(
+        jti=str(payload['jti']),
+        token_type='refresh',
+        user_id=str(user['id']),
+        session_id=str(session['id']),
+        expires_at=str(payload['exp_iso']),
+        reason='refresh_rotation',
+    )
+    rotate_refresh_session(session_id=str(session['id']), next_refresh_jti=next_refresh_jti, last_seen=now.isoformat())
+
+    access_token = _mint_access_token(user, issued_at=now, session_id=str(session['id']))
+    refresh_token = _mint_refresh_token(
+        user,
+        issued_at=now,
+        session_id=str(session['id']),
+        refresh_jti=next_refresh_jti,
+        persist_session=False,
+    )
+    return {
+        'access_token': access_token,
+        'refresh_token': refresh_token,
+        'token_type': 'Bearer',
+        'username': str(user['username']),
+        'role': str(user['role']),
+    }
+
+
+@app.post('/api/logout')
+def logout_route(request: RefreshRequest, authorization: str | None = Header(default=None)) -> dict[str, str]:
+    principal = _require_auth_principal(authorization)
+    access_payload = _decode_and_validate_jwt(principal['token'], expected_token_type='access')
+    refresh_payload = _decode_and_validate_jwt(request.refresh_token, expected_token_type='refresh')
+    if access_payload['sub'] != refresh_payload['sub']:
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Token subject mismatch'})
+
+    session = get_refresh_session_by_jti(str(refresh_payload['jti']))
+    if session:
+        revoke_refresh_session(str(session['id']), revoked_at=_utcnow_dt().isoformat())
+    revoke_token(
+        jti=str(access_payload['jti']),
+        token_type='access',
+        user_id=str(principal['user_id']),
+        session_id=str(session['id']) if session else None,
+        expires_at=str(access_payload['exp_iso']),
+        reason='logout',
+    )
+    revoke_token(
+        jti=str(refresh_payload['jti']),
+        token_type='refresh',
+        user_id=str(principal['user_id']),
+        session_id=str(session['id']) if session else None,
+        expires_at=str(refresh_payload['exp_iso']),
+        reason='logout',
+    )
+    return {'status': 'revoked'}
 
 
 @app.get('/api/jobs')
@@ -450,16 +548,130 @@ def _render_metrics(
     return '\n'.join(lines) + '\n'
 
 
+def _seed_auth_storage() -> None:
+    for username, data in settings.auth_default_users.items():
+        password_hash = hashlib.sha256(str(data['password']).encode('utf-8')).hexdigest()
+        role = str(data['role'])
+        upsert_user(username, password_hash=password_hash, role=role)
+        user = get_user_by_username(username)
+        if user:
+            ensure_identity(user_id=str(user['id']), provider='local', subject=username)
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = '=' * (-len(value) % 4)
+    return base64.urlsafe_b64decode(f'{value}{padding}')
+
+
+def _sign_jwt(claims: dict[str, Any]) -> str:
+    header = {'alg': 'HS256', 'typ': 'JWT'}
+    header_b64 = _b64url_encode(json.dumps(header, separators=(',', ':')).encode('utf-8'))
+    payload_b64 = _b64url_encode(json.dumps(claims, separators=(',', ':')).encode('utf-8'))
+    signing_input = f'{header_b64}.{payload_b64}'.encode('ascii')
+    signature = hmac.new(settings.auth_secret_key.encode('utf-8'), signing_input, hashlib.sha256).digest()
+    return f'{header_b64}.{payload_b64}.{_b64url_encode(signature)}'
+
+
+def _decode_and_validate_jwt(token: str, expected_token_type: str) -> dict[str, Any]:
+    try:
+        header_b64, payload_b64, signature_b64 = token.split('.')
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Malformed token'}) from exc
+    signing_input = f'{header_b64}.{payload_b64}'.encode('ascii')
+    expected_sig = hmac.new(settings.auth_secret_key.encode('utf-8'), signing_input, hashlib.sha256).digest()
+    actual_sig = _b64url_decode(signature_b64)
+    if not hmac.compare_digest(expected_sig, actual_sig):
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Invalid token signature'})
+    claims = json.loads(_b64url_decode(payload_b64))
+    now_ts = int(_utcnow_dt().timestamp())
+    if claims.get('iss') != settings.auth_issuer or claims.get('aud') != settings.auth_audience:
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Invalid token audience'})
+    if claims.get('typ') != expected_token_type:
+        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Invalid token type'})
+    if int(claims.get('exp', 0)) <= now_ts:
+        raise HTTPException(status_code=401, detail={'code': 'auth_expired', 'message': 'Token expired'})
+    if is_token_revoked(str(claims.get('jti'))):
+        raise HTTPException(status_code=401, detail={'code': 'auth_revoked', 'message': 'Token revoked'})
+    claims['exp_iso'] = datetime.fromtimestamp(int(claims['exp']), tz=timezone.utc).isoformat()
+    return claims
+
+
+def _mint_access_token(user: dict[str, Any], issued_at: datetime, session_id: str | None = None) -> str:
+    iat = int(issued_at.timestamp())
+    exp = int((issued_at + timedelta(seconds=settings.auth_access_token_ttl_seconds)).timestamp())
+    claims = {
+        'iss': settings.auth_issuer,
+        'aud': settings.auth_audience,
+        'sub': str(user['username']),
+        'uid': str(user['id']),
+        'role': str(user['role']),
+        'typ': 'access',
+        'iat': iat,
+        'exp': exp,
+        'jti': str(uuid.uuid4()),
+        'sid': session_id,
+    }
+    return _sign_jwt(claims)
+
+
+def _mint_refresh_token(
+    user: dict[str, Any],
+    issued_at: datetime,
+    session_id: str | None = None,
+    refresh_jti: str | None = None,
+    persist_session: bool = True,
+) -> str:
+    iat = int(issued_at.timestamp())
+    exp_dt = issued_at + timedelta(seconds=settings.auth_refresh_token_ttl_seconds)
+    jti = refresh_jti or str(uuid.uuid4())
+    if persist_session:
+        session = create_refresh_session(
+            user_id=str(user['id']),
+            refresh_jti=jti,
+            issued_at=issued_at.isoformat(),
+            expires_at=exp_dt.isoformat(),
+        )
+        session_id = str(session['id'])
+    claims = {
+        'iss': settings.auth_issuer,
+        'aud': settings.auth_audience,
+        'sub': str(user['username']),
+        'uid': str(user['id']),
+        'role': str(user['role']),
+        'typ': 'refresh',
+        'iat': iat,
+        'exp': int(exp_dt.timestamp()),
+        'jti': jti,
+        'sid': session_id,
+    }
+    return _sign_jwt(claims)
+
+
+def _utcnow_dt() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    return datetime.fromisoformat(value)
+
+
 def _require_auth_principal(authorization: str | None) -> dict[str, str]:
     if not authorization:
         raise HTTPException(status_code=401, detail={'code': 'auth_required', 'message': 'Authorization required'})
     scheme, _, token = authorization.partition(' ')
     if scheme.lower() != 'bearer' or not token:
         raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Invalid authorization header'})
-    principal = _TOKENS.get(token)
-    if not principal:
-        raise HTTPException(status_code=401, detail={'code': 'auth_invalid', 'message': 'Invalid access token'})
-    return principal
+    claims = _decode_and_validate_jwt(token, expected_token_type='access')
+    return {
+        'username': str(claims['sub']),
+        'role': str(claims.get('role', 'submitter')),
+        'user_id': str(claims.get('uid', '')),
+        'token': token,
+    }
 
 
 def _require_job_ownership(job_id: str, principal: dict[str, str]) -> None:

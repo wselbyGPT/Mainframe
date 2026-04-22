@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 
 
@@ -16,6 +17,17 @@ def _get_int(name: str, default: int) -> int:
     if value is None:
         return default
     return int(value)
+
+
+def _get_default_users() -> dict[str, dict[str, str]]:
+    raw = os.getenv(
+        'AUTH_LOCAL_USERS_JSON',
+        '{"alice": {"password": "alice-pass", "role": "submitter"}, '
+        '"bob": {"password": "bob-pass", "role": "submitter"}, '
+        '"admin": {"password": "admin-pass", "role": "admin"}}',
+    )
+    parsed = json.loads(raw)
+    return {str(username): {'password': str(item['password']), 'role': str(item['role'])} for username, item in parsed.items()}
 
 
 @dataclass(frozen=True)
@@ -43,6 +55,12 @@ class Settings:
     spool_retention_days: int = _get_int("SPOOL_RETENTION_DAYS", 14)
     cleanup_interval_seconds: int = _get_int("CLEANUP_INTERVAL_SECONDS", 300)
     cleanup_batch_size: int = _get_int("CLEANUP_BATCH_SIZE", 100)
+    auth_secret_key: str = os.getenv('AUTH_SECRET_KEY', 'dev-only-change-me')
+    auth_issuer: str = os.getenv('AUTH_ISSUER', 'tk4-portal')
+    auth_audience: str = os.getenv('AUTH_AUDIENCE', 'tk4-portal-api')
+    auth_access_token_ttl_seconds: int = _get_int('AUTH_ACCESS_TOKEN_TTL_SECONDS', 900)
+    auth_refresh_token_ttl_seconds: int = _get_int('AUTH_REFRESH_TOKEN_TTL_SECONDS', 604800)
+    auth_default_users: dict[str, dict[str, str]] = _get_default_users()
 
 
 settings = Settings()

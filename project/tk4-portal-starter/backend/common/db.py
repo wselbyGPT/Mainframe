@@ -108,6 +108,48 @@ def init_db() -> None:
                     payload_json TEXT NOT NULL,
                     FOREIGN KEY(job_id) REFERENCES jobs(id)
                 );
+
+                CREATE TABLE IF NOT EXISTS users (
+                    id TEXT PRIMARY KEY,
+                    username TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS identities (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(provider, subject),
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS refresh_sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    refresh_jti TEXT NOT NULL UNIQUE,
+                    issued_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    last_seen TEXT,
+                    revoked_at TEXT,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS token_revocations (
+                    jti TEXT PRIMARY KEY,
+                    token_type TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    session_id TEXT,
+                    revoked_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    reason TEXT,
+                    FOREIGN KEY(user_id) REFERENCES users(id),
+                    FOREIGN KEY(session_id) REFERENCES refresh_sessions(id)
+                );
                 """
             )
             if not _table_has_column(conn, 'jobs', 'attempt'):
@@ -131,6 +173,141 @@ def init_db() -> None:
             conn.commit()
         finally:
             conn.close()
+
+
+def upsert_user(username: str, password_hash: str, role: str) -> None:
+    now = _utcnow()
+    user_id = str(uuid.uuid4())
+    with _LOCK:
+        conn = connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO users (id, username, password_hash, role, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(username) DO UPDATE SET
+                    password_hash = excluded.password_hash,
+                    role = excluded.role,
+                    updated_at = excluded.updated_at
+                """,
+                (user_id, username, password_hash, role, now, now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def get_user_by_username(username: str) -> dict[str, Any] | None:
+    conn = connect()
+    try:
+        row = conn.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def ensure_identity(user_id: str, provider: str, subject: str) -> None:
+    with _LOCK:
+        conn = connect()
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO identities (id, user_id, provider, subject, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), user_id, provider, subject, _utcnow()),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def create_refresh_session(user_id: str, refresh_jti: str, issued_at: str, expires_at: str) -> dict[str, Any]:
+    session_id = str(uuid.uuid4())
+    with _LOCK:
+        conn = connect()
+        try:
+            conn.execute(
+                """
+                INSERT INTO refresh_sessions (id, user_id, refresh_jti, issued_at, expires_at, last_seen, revoked_at)
+                VALUES (?, ?, ?, ?, ?, ?, NULL)
+                """,
+                (session_id, user_id, refresh_jti, issued_at, expires_at, issued_at),
+            )
+            conn.commit()
+            row = conn.execute('SELECT * FROM refresh_sessions WHERE id = ?', (session_id,)).fetchone()
+            return dict(row)
+        finally:
+            conn.close()
+
+
+def get_refresh_session_by_jti(refresh_jti: str) -> dict[str, Any] | None:
+    conn = connect()
+    try:
+        row = conn.execute('SELECT * FROM refresh_sessions WHERE refresh_jti = ?', (refresh_jti,)).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def rotate_refresh_session(session_id: str, next_refresh_jti: str, last_seen: str) -> None:
+    with _LOCK:
+        conn = connect()
+        try:
+            conn.execute(
+                'UPDATE refresh_sessions SET refresh_jti = ?, last_seen = ? WHERE id = ?',
+                (next_refresh_jti, last_seen, session_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def revoke_refresh_session(session_id: str, revoked_at: str) -> None:
+    with _LOCK:
+        conn = connect()
+        try:
+            conn.execute(
+                'UPDATE refresh_sessions SET revoked_at = ?, last_seen = ? WHERE id = ?',
+                (revoked_at, revoked_at, session_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def revoke_token(
+    jti: str,
+    token_type: str,
+    user_id: str,
+    session_id: str | None,
+    expires_at: str,
+    reason: str | None = None,
+) -> None:
+    revoked_at = _utcnow()
+    with _LOCK:
+        conn = connect()
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO token_revocations
+                (jti, token_type, user_id, session_id, revoked_at, expires_at, reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (jti, token_type, user_id, session_id, revoked_at, expires_at, reason),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def is_token_revoked(jti: str) -> bool:
+    conn = connect()
+    try:
+        row = conn.execute('SELECT 1 FROM token_revocations WHERE jti = ?', (jti,)).fetchone()
+        return row is not None
+    finally:
+        conn.close()
 
 
 def create_job(template_id: str, submitted_by: str, params: dict[str, Any]) -> dict[str, Any]:

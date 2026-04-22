@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -22,6 +23,9 @@ class TemplateApiTests(unittest.TestCase):
         cls._tmp = tempfile.TemporaryDirectory()
         cls._db_path = str(Path(cls._tmp.name) / 'jobs.sqlite3')
         object.__setattr__(settings, 'database_path', cls._db_path)
+        object.__setattr__(settings, 'auth_secret_key', 'test-secret-key')
+        object.__setattr__(settings, 'auth_access_token_ttl_seconds', 1)
+        object.__setattr__(settings, 'auth_refresh_token_ttl_seconds', 60)
         db.init_db()
         cls.client = TestClient(app)
 
@@ -35,6 +39,11 @@ class TemplateApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         token = response.json()['access_token']
         return {'Authorization': f'Bearer {token}'}
+
+    def _login_tokens(self, username: str = 'alice', password: str = 'alice-pass') -> dict[str, str]:
+        response = self.client.post('/api/login', json={'username': username, 'password': password})
+        self.assertEqual(response.status_code, 200)
+        return response.json()
 
     def test_get_templates_catalog(self) -> None:
         response = self.client.get('/api/templates')
@@ -136,6 +145,57 @@ class TemplateApiTests(unittest.TestCase):
         response = self.client.post('/api/jobs', json={'params': {'message': 'no auth'}})
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()['detail']['code'], 'auth_required')
+
+    def test_expired_token_rejected(self) -> None:
+        tokens = self._login_tokens()
+        time.sleep(1.1)
+        response = self.client.post(
+            '/api/jobs',
+            json={'params': {'message': 'expired token'}},
+            headers={'Authorization': f"Bearer {tokens['access_token']}"},
+        )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()['detail']['code'], 'auth_expired')
+
+    def test_refresh_rotation(self) -> None:
+        tokens = self._login_tokens()
+        refreshed = self.client.post('/api/refresh', json={'refresh_token': tokens['refresh_token']})
+        self.assertEqual(refreshed.status_code, 200)
+        refreshed_tokens = refreshed.json()
+        self.assertNotEqual(refreshed_tokens['refresh_token'], tokens['refresh_token'])
+
+        replay = self.client.post('/api/refresh', json={'refresh_token': tokens['refresh_token']})
+        self.assertEqual(replay.status_code, 401)
+        self.assertEqual(replay.json()['detail']['code'], 'auth_revoked')
+
+    def test_revoked_token_denied(self) -> None:
+        tokens = self._login_tokens()
+        logout = self.client.post(
+            '/api/logout',
+            json={'refresh_token': tokens['refresh_token']},
+            headers={'Authorization': f"Bearer {tokens['access_token']}"},
+        )
+        self.assertEqual(logout.status_code, 200)
+
+        denied = self.client.post(
+            '/api/jobs',
+            json={'params': {'message': 'after logout'}},
+            headers={'Authorization': f"Bearer {tokens['access_token']}"},
+        )
+        self.assertEqual(denied.status_code, 401)
+        self.assertEqual(denied.json()['detail']['code'], 'auth_revoked')
+
+    def test_session_survives_app_restart(self) -> None:
+        from app.main import app as real_app
+
+        tokens = self._login_tokens()
+        self.client.close()
+        self.client = TestClient(real_app)
+
+        refreshed = self.client.post('/api/refresh', json={'refresh_token': tokens['refresh_token']})
+        self.assertEqual(refreshed.status_code, 200)
+        payload = refreshed.json()
+        self.assertIn('access_token', payload)
 
     def test_get_job_details_includes_stage_timeline_and_artifact_links(self) -> None:
         created = self.client.post(
