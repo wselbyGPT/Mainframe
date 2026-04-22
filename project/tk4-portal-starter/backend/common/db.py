@@ -13,6 +13,8 @@ from common.config import settings
 _LOCK = threading.Lock()
 _CANCELABLE_STATES = {
     'queued',
+    'reserved',
+    'retryable',
     'starting',
     'submitted',
     'running',
@@ -77,6 +79,10 @@ def init_db() -> None:
                     abend_code TEXT,
                     error_text TEXT,
                     stage TEXT,
+                    available_at TEXT,
+                    lease_owner TEXT,
+                    lease_expires_at TEXT,
+                    dead_letter_reason TEXT,
                     created_at TEXT NOT NULL,
                     started_at TEXT,
                     finished_at TEXT,
@@ -110,6 +116,14 @@ def init_db() -> None:
                 conn.execute('ALTER TABLE jobs ADD COLUMN parent_job_id TEXT')
             if not _table_has_column(conn, 'jobs', 'retry_of_job_id'):
                 conn.execute('ALTER TABLE jobs ADD COLUMN retry_of_job_id TEXT')
+            if not _table_has_column(conn, 'jobs', 'available_at'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN available_at TEXT')
+            if not _table_has_column(conn, 'jobs', 'lease_owner'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN lease_owner TEXT')
+            if not _table_has_column(conn, 'jobs', 'lease_expires_at'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN lease_expires_at TEXT')
+            if not _table_has_column(conn, 'jobs', 'dead_letter_reason'):
+                conn.execute('ALTER TABLE jobs ADD COLUMN dead_letter_reason TEXT')
             if not _table_has_column(conn, 'spool_sections', 'attempt'):
                 conn.execute('ALTER TABLE spool_sections ADD COLUMN attempt INTEGER NOT NULL DEFAULT 1')
             if not _table_has_column(conn, 'job_events', 'attempt'):
@@ -129,10 +143,10 @@ def create_job(template_id: str, submitted_by: str, params: dict[str, Any]) -> d
                 """
                 INSERT INTO jobs (
                     id, template_id, submitted_by, input_params_json, attempt, parent_job_id, state,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    available_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job_id, template_id, submitted_by, json.dumps(params), 1, job_id, 'queued', now, now),
+                (job_id, template_id, submitted_by, json.dumps(params), 1, job_id, 'queued', now, now, now),
             )
             conn.commit()
         finally:
@@ -211,24 +225,12 @@ def list_jobs() -> list[dict[str, Any]]:
 
 
 def next_queued_job() -> dict[str, Any] | None:
-    with _LOCK:
-        conn = connect()
-        try:
-            row = conn.execute(
-                "SELECT * FROM jobs WHERE state = 'queued' ORDER BY created_at ASC LIMIT 1"
-            ).fetchone()
-            if not row:
-                return None
-            now = _utcnow()
-            conn.execute(
-                "UPDATE jobs SET state = 'starting', started_at = ?, updated_at = ? WHERE id = ?",
-                (now, now, row['id']),
-            )
-            conn.commit()
-            fresh = conn.execute('SELECT * FROM jobs WHERE id = ?', (row['id'],)).fetchone()
-            return dict(fresh) if fresh else None
-        finally:
-            conn.close()
+    from common.queue_backend import QueueBackend
+
+    lease = QueueBackend().reserve('legacy-worker', lease_seconds=30)
+    if not lease:
+        return None
+    return lease.job
 
 
 def get_spool_sections(job_id: str) -> list[dict[str, Any]]:
@@ -346,6 +348,112 @@ def _insert_event_locked(
     )
 
 
+def transition_job_state(
+    job_id: str,
+    *,
+    to_state: str,
+    from_states: set[str],
+    extra_fields: dict[str, Any] | None = None,
+    expected_worker: str | None = None,
+    idempotent: bool = False,
+) -> dict[str, Any] | None:
+    with _LOCK:
+        conn = connect()
+        try:
+            row = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            if not row:
+                return None
+            job = dict(row)
+            state = str(job['state'])
+            if state == to_state and idempotent:
+                return job
+            if state not in from_states:
+                raise JobTransitionError(
+                    code='invalid_transition',
+                    message=f"Cannot transition job from state '{state}' to '{to_state}'",
+                    state=state,
+                )
+            if expected_worker is not None and job.get('lease_owner') != expected_worker:
+                raise JobTransitionError(
+                    code='lease_mismatch',
+                    message='Lease ownership mismatch',
+                    state=state,
+                )
+            now = _utcnow()
+            updates = {'state': to_state, 'updated_at': now}
+            if extra_fields:
+                updates.update(extra_fields)
+            assignments = ', '.join(f"{name} = ?" for name in updates)
+            conn.execute(f'UPDATE jobs SET {assignments} WHERE id = ?', (*updates.values(), job_id))
+            _insert_event_locked(
+                conn,
+                job_id,
+                int(job.get('attempt') or 1),
+                'job.state',
+                {'from_state': state, 'state': to_state, 'attempt': int(job.get('attempt') or 1)},
+            )
+            conn.commit()
+            fresh = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            return dict(fresh) if fresh else None
+        finally:
+            conn.close()
+
+
+def extend_lease(job_id: str, worker_id: str, *, lease_seconds: int) -> bool:
+    with _LOCK:
+        conn = connect()
+        try:
+            row = conn.execute(
+                'SELECT id FROM jobs WHERE id = ? AND state IN (\'reserved\', \'running\') AND lease_owner = ?',
+                (job_id, worker_id),
+            ).fetchone()
+            if not row:
+                return False
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max(1, int(lease_seconds)))).isoformat()
+            now = _utcnow()
+            conn.execute(
+                'UPDATE jobs SET lease_expires_at = ?, updated_at = ? WHERE id = ?',
+                (expires_at, now, job_id),
+            )
+            _insert_event_locked(
+                conn,
+                job_id,
+                int(conn.execute('SELECT attempt FROM jobs WHERE id = ?', (job_id,)).fetchone()['attempt']),
+                'job.heartbeat',
+                {'lease_expires_at': expires_at, 'worker_id': worker_id},
+            )
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+
+def clear_lease(job_id: str, worker_id: str) -> dict[str, Any] | None:
+    with _LOCK:
+        conn = connect()
+        try:
+            row = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            if not row:
+                return None
+            job = dict(row)
+            if job.get('lease_owner') and job.get('lease_owner') != worker_id:
+                raise JobTransitionError(
+                    code='lease_mismatch',
+                    message='Cannot clear a lease owned by another worker',
+                    state=str(job.get('state')),
+                )
+            now = _utcnow()
+            conn.execute(
+                'UPDATE jobs SET lease_owner = NULL, lease_expires_at = NULL, updated_at = ? WHERE id = ?',
+                (now, job_id),
+            )
+            conn.commit()
+            fresh = conn.execute('SELECT * FROM jobs WHERE id = ?', (job_id,)).fetchone()
+            return dict(fresh) if fresh else None
+        finally:
+            conn.close()
+
+
 def cancel_job(job_id: str) -> dict[str, Any] | None:
     with _LOCK:
         conn = connect()
@@ -365,7 +473,8 @@ def cancel_job(job_id: str) -> dict[str, Any] | None:
             conn.execute(
                 """
                 UPDATE jobs
-                SET state = ?, result = ?, stage = ?, finished_at = ?, updated_at = ?
+                SET state = ?, result = ?, stage = ?, finished_at = ?, lease_owner = NULL,
+                    lease_expires_at = NULL, updated_at = ?
                 WHERE id = ?
                 """,
                 ('canceled', 'canceled', 'canceled', now, now, job_id),
@@ -407,10 +516,11 @@ def retry_job(job_id: str) -> dict[str, Any] | None:
                 UPDATE jobs
                 SET attempt = ?, state = ?, result = NULL, mainframe_job_id = NULL, return_code = NULL,
                     abend_code = NULL, error_text = NULL, stage = NULL, started_at = NULL, finished_at = NULL,
+                    available_at = ?, lease_owner = NULL, lease_expires_at = NULL, dead_letter_reason = NULL,
                     updated_at = ?, retry_of_job_id = ?
                 WHERE id = ?
                 """,
-                (next_attempt, 'queued', now, job_id, job_id),
+                (next_attempt, 'queued', now, now, job_id, job_id),
             )
             _insert_event_locked(
                 conn,
@@ -459,10 +569,11 @@ def requeue_job(job_id: str) -> dict[str, Any] | None:
                 UPDATE jobs
                 SET attempt = ?, state = ?, result = NULL, mainframe_job_id = NULL, return_code = NULL,
                     abend_code = NULL, error_text = NULL, stage = NULL, started_at = NULL, finished_at = NULL,
+                    available_at = ?, lease_owner = NULL, lease_expires_at = NULL, dead_letter_reason = NULL,
                     updated_at = ?, retry_of_job_id = NULL
                 WHERE id = ?
                 """,
-                (next_attempt, 'queued', now, job_id),
+                (next_attempt, 'queued', now, now, job_id),
             )
             _insert_event_locked(
                 conn,
