@@ -64,6 +64,7 @@ class TemplateSchemaDiscoveryTests(unittest.TestCase):
         template_ids = {item['template_id'] for item in pack['templates']}
         self.assertIn('hello-world', template_ids)
         self.assertIn('compatibility', pack)
+        self.assertIn('params', pack)
 
     def test_get_single_template_schema(self) -> None:
         schema = get_template_schema('sort-basic')
@@ -74,7 +75,10 @@ class TemplateSchemaDiscoveryTests(unittest.TestCase):
     def test_template_schema_can_include_pack_metadata(self) -> None:
         schema = get_template_schema('sort-basic', include_pack_metadata=True)
         self.assertEqual(schema['operations_pack']['operations_pack_id'], 'ops-core')
-        self.assertIn('target_profiles', schema['compatibility'])
+        self.assertIn('target_profiles', schema['compatibility']['template'])
+        self.assertIn('target_profiles', schema['compatibility']['pack'])
+        self.assertIn('job_name', schema['operations_pack']['params'])
+        self.assertIn('job_name', schema['template_param_overrides'])
 
     def test_inherited_defaults_and_template_override(self) -> None:
         hello = get_template_schema('hello-world')

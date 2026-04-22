@@ -48,6 +48,24 @@ class TemplateApiTests(unittest.TestCase):
         hello_world = next(item for item in payload['templates'] if item['template_id'] == 'hello-world')
         self.assertEqual(hello_world['params']['job_name']['default'], 'HELLO1')
 
+
+    def test_get_templates_catalog_grouped_with_pack_metadata(self) -> None:
+        response = self.client.get('/api/templates', params={'grouped': True, 'include_pack_metadata': True})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn('packs', payload)
+        self.assertEqual(payload['packs'][0]['operations_pack_id'], 'ops-core')
+        self.assertIn('params', payload['packs'][0])
+        self.assertIn('operations_pack', payload['packs'][0]['templates'][0])
+
+    def test_get_template_details_can_include_pack_metadata(self) -> None:
+        response = self.client.get('/api/templates/hello-world', params={'include_pack_metadata': True})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['operations_pack']['operations_pack_id'], 'ops-core')
+        self.assertIn('pack', payload['compatibility'])
+        self.assertIn('template', payload['compatibility'])
+
     def test_index_serves_web_ui(self) -> None:
         response = self.client.get('/')
         self.assertEqual(response.status_code, 200)
