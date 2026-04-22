@@ -42,6 +42,7 @@ from common.db import (
 )
 from common.config import settings
 from common.observability import get_logger, parse_iso8601, setup_logging
+from common.slo import compute_slo_report, get_objective_report
 from common.spool_parser import summarize_sections
 from common.template_schemas import (
     TemplateSchemaError,
@@ -127,6 +128,24 @@ def ops_dashboard() -> dict[str, Any]:
     }
 
 
+
+
+@app.get('/api/ops/slo')
+def ops_slo() -> dict[str, Any]:
+    jobs_payload = list_jobs()
+    events_by_job_id = {job['id']: get_job_events(job['id']) for job in jobs_payload}
+    return compute_slo_report(jobs=jobs_payload, events_by_job_id=events_by_job_id)
+
+
+@app.get('/api/ops/slo/{objective_id}')
+def ops_slo_objective(objective_id: str) -> dict[str, Any]:
+    jobs_payload = list_jobs()
+    events_by_job_id = {job['id']: get_job_events(job['id']) for job in jobs_payload}
+    objective = get_objective_report(objective_id, jobs=jobs_payload, events_by_job_id=events_by_job_id)
+    if objective is None:
+        raise HTTPException(status_code=404, detail={'code': 'slo_objective_not_found', 'message': 'SLO objective not found'})
+    return objective
+
 @app.get('/api/ops/metrics')
 def ops_metrics() -> PlainTextResponse:
     jobs_payload = list_jobs()
@@ -148,6 +167,10 @@ def ops_metrics() -> PlainTextResponse:
             current['sections'] += int(item.get('sections', 0))
             current['lines'] += int(item.get('lines', 0))
 
+    slo_report = compute_slo_report(
+        jobs=jobs_payload,
+        events_by_job_id={job['id']: get_job_events(job['id']) for job in jobs_payload},
+    )
     body = _render_metrics(
         jobs_total=len(jobs_payload),
         jobs_terminal_total=len(terminal),
@@ -155,6 +178,7 @@ def ops_metrics() -> PlainTextResponse:
         spool_type_totals=spool_type_totals,
         spool_rc_nonzero_total=spool_rc_nonzero_total,
         spool_abend_total=spool_abend_total,
+        slo_report=slo_report,
     )
     return PlainTextResponse(content=body, media_type='text/plain; version=0.0.4')
 
@@ -513,6 +537,7 @@ def _render_metrics(
     spool_type_totals: dict[str, dict[str, int]],
     spool_rc_nonzero_total: int,
     spool_abend_total: int,
+    slo_report: dict[str, Any],
 ) -> str:
     lines = [
         '# HELP tk4_jobs_total Total jobs persisted in the portal database.',
@@ -545,6 +570,44 @@ def _render_metrics(
     for section_type in sorted(spool_type_totals):
         metrics = spool_type_totals[section_type]
         lines.append(f'tk4_spool_lines_total{{section_type="{section_type}"}} {metrics["lines"]}')
+
+    lines.extend(
+        [
+            '# HELP tk4_slo_objective_status SLO objective status encoded as met=2, at-risk=1, breached=0.',
+            '# TYPE tk4_slo_objective_status gauge',
+            '# HELP tk4_slo_error_budget_remaining_ratio Remaining error budget ratio for the primary window.',
+            '# TYPE tk4_slo_error_budget_remaining_ratio gauge',
+            '# HELP tk4_slo_burn_rate Burn-rate in short and long windows.',
+            '# TYPE tk4_slo_burn_rate gauge',
+            '# HELP tk4_slo_sli_ratio Rolling SLI ratio per objective and window.',
+            '# TYPE tk4_slo_sli_ratio gauge',
+            '# HELP tk4_slo_samples_total Rolling sample count per objective and window.',
+            '# TYPE tk4_slo_samples_total counter',
+        ]
+    )
+    status_map = {'met': 2, 'at-risk': 1, 'breached': 0}
+    for objective in slo_report.get('objectives', []):
+        objective_id = objective.get('objective_id', 'unknown')
+        status = objective.get('status', 'breached')
+        lines.append(f'tk4_slo_objective_status{{objective_id="{objective_id}",status="{status}"}} {status_map.get(status, 0)}')
+        remaining_ratio = objective.get('error_budget', {}).get('remaining_ratio')
+        if remaining_ratio is not None:
+            lines.append(f'tk4_slo_error_budget_remaining_ratio{{objective_id="{objective_id}"}} {remaining_ratio}')
+        short_burn = objective.get('burn_rate', {}).get('short')
+        if short_burn is not None:
+            lines.append(f'tk4_slo_burn_rate{{objective_id="{objective_id}",window="short"}} {short_burn}')
+        long_burn = objective.get('burn_rate', {}).get('long')
+        if long_burn is not None:
+            lines.append(f'tk4_slo_burn_rate{{objective_id="{objective_id}",window="long"}} {long_burn}')
+        for window_name, window_metrics in (objective.get('windows') or {}).items():
+            sli = window_metrics.get('sli')
+            if sli is not None:
+                lines.append(
+                    f'tk4_slo_sli_ratio{{objective_id="{objective_id}",window="{window_name}"}} {sli}'
+                )
+            lines.append(
+                f'tk4_slo_samples_total{{objective_id="{objective_id}",window="{window_name}"}} {int(window_metrics.get("total", 0))}'
+            )
     return '\n'.join(lines) + '\n'
 
 
