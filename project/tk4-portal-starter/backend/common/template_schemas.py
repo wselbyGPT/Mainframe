@@ -28,148 +28,159 @@ class UnknownTemplateError(TemplateSchemaError):
     """Raised when a template_id does not exist."""
 
 
-TEMPLATE_SCHEMAS: dict[str, dict[str, Any]] = {
-    'hello-world': {
-        'description': 'Print a literal message to SYSOUT via IEBGENER.',
+TEMPLATE_PACKS: list[dict[str, Any]] = [
+    {
+        'operations_pack_id': 'ops-core',
+        'version': '1.0.0',
+        'description': 'Core z/OS operations templates for common utility and catalog workflows.',
+        'compatibility': {
+            'target_images': ['TK4-'],
+            'target_profiles': ['starter', 'full'],
+        },
         'params': {
             'job_name': {
                 'type': 'string',
                 'required': False,
-                'default': 'HELLO1',
+                'default': 'WEBJOB',
                 'format': 'jcl_job_name',
                 'help': 'JCL job name (1-8 chars, starts with A-Z, then A-Z0-9#$@).',
                 'examples': ['HELLO1', 'MYJOB99'],
             },
-            'message': {
-                'type': 'string',
-                'required': False,
-                'default': 'HELLO FROM WEB PORTAL',
-                'help': 'Message line written to SYSUT1 in-stream data.',
-                'examples': ['HELLO FROM THE WEB PORTAL'],
-            },
         },
-    },
-    'idcams-listcat': {
-        'description': 'Run IDCAMS LISTCAT for a catalog or level filter.',
-        'params': {
-            'job_name': {
-                'type': 'string',
-                'required': False,
-                'default': 'LISTCAT',
-                'format': 'jcl_job_name',
-                'help': 'JCL job name (1-8 chars, starts with A-Z, then A-Z0-9#$@).',
-                'examples': ['LISTCAT'],
+        'templates': [
+            {
+                'template_id': 'hello-world',
+                'description': 'Print a literal message to SYSOUT via IEBGENER.',
+                'compatibility': {
+                    'target_images': ['TK4-'],
+                    'target_profiles': ['starter', 'full'],
+                },
+                'params': {
+                    'job_name': {'default': 'HELLO1'},
+                    'message': {
+                        'type': 'string',
+                        'required': False,
+                        'default': 'HELLO FROM WEB PORTAL',
+                        'help': 'Message line written to SYSUT1 in-stream data.',
+                        'examples': ['HELLO FROM THE WEB PORTAL'],
+                    },
+                },
             },
-            'level': {
-                'type': 'string',
-                'required': True,
-                'help': 'LISTCAT LEVEL operand (for example: SYS1 or USER.TEST).',
-                'examples': ['SYS1', 'USER.TEST'],
+            {
+                'template_id': 'idcams-listcat',
+                'description': 'Run IDCAMS LISTCAT for a catalog or level filter.',
+                'compatibility': {
+                    'target_images': ['TK4-'],
+                    'target_profiles': ['starter', 'full'],
+                },
+                'params': {
+                    'job_name': {'default': 'LISTCAT', 'examples': ['LISTCAT']},
+                    'level': {
+                        'type': 'string',
+                        'required': True,
+                        'help': 'LISTCAT LEVEL operand (for example: SYS1 or USER.TEST).',
+                        'examples': ['SYS1', 'USER.TEST'],
+                    },
+                },
             },
-        },
-    },
-    'iebgener-copy': {
-        'description': 'Copy one sequential dataset to another via IEBGENER.',
-        'params': {
-            'job_name': {
-                'type': 'string',
-                'required': False,
-                'default': 'IEBGEN',
-                'format': 'jcl_job_name',
-                'help': 'JCL job name (1-8 chars, starts with A-Z, then A-Z0-9#$@).',
-                'examples': ['COPYJOB'],
+            {
+                'template_id': 'iebgener-copy',
+                'description': 'Copy one sequential dataset to another via IEBGENER.',
+                'compatibility': {
+                    'target_images': ['TK4-'],
+                    'target_profiles': ['full'],
+                },
+                'params': {
+                    'job_name': {'default': 'IEBGEN', 'examples': ['COPYJOB']},
+                    'input_dataset': {
+                        'type': 'string',
+                        'required': True,
+                        'help': 'Input DSN to read (quoted in JCL).',
+                        'examples': ['SYS1.PROCLIB'],
+                    },
+                    'output_dataset': {
+                        'type': 'string',
+                        'required': True,
+                        'help': 'Output DSN to write (quoted in JCL).',
+                        'examples': ['IBMUSER.PROCLIB'],
+                    },
+                },
             },
-            'input_dataset': {
-                'type': 'string',
-                'required': True,
-                'help': 'Input DSN to read (quoted in JCL).',
-                'examples': ['SYS1.PROCLIB'],
+            {
+                'template_id': 'sort-basic',
+                'description': 'Run SORT with a simple key on fixed records.',
+                'compatibility': {
+                    'target_images': ['TK4-'],
+                    'target_profiles': ['full'],
+                },
+                'params': {
+                    'job_name': {'default': 'SORTJOB', 'examples': ['SORTJOB']},
+                    'input_dataset': {
+                        'type': 'string',
+                        'required': True,
+                        'help': 'Input DSN to sort (quoted in JCL).',
+                        'examples': ['IBMUSER.INPUT'],
+                    },
+                    'output_dataset': {
+                        'type': 'string',
+                        'required': True,
+                        'help': 'Output DSN for sorted records (quoted in JCL).',
+                        'examples': ['IBMUSER.OUTPUT'],
+                    },
+                    'sort_fields': {
+                        'type': 'string',
+                        'required': False,
+                        'default': '1,10,CH,A',
+                        'help': 'DFSORT SORT FIELDS expression.',
+                        'examples': ['1,10,CH,A', '1,8,CH,D'],
+                    },
+                },
             },
-            'output_dataset': {
-                'type': 'string',
-                'required': True,
-                'help': 'Output DSN to write (quoted in JCL).',
-                'examples': ['IBMUSER.PROCLIB'],
+            {
+                'template_id': 'lattice-crypto-demo',
+                'description': 'Emit a lattice cryptography runbook stub to SYSOUT for mainframe operator workflows.',
+                'compatibility': {
+                    'target_images': ['TK4-'],
+                    'target_profiles': ['starter', 'full'],
+                },
+                'params': {
+                    'job_name': {'default': 'LATTICE', 'examples': ['LATTICE', 'PQCDEMO1']},
+                    'algorithm': {
+                        'type': 'string',
+                        'required': False,
+                        'default': 'CRYSTALS-KYBER',
+                        'help': 'Lattice KEM or signature algorithm label for run documentation.',
+                        'examples': ['CRYSTALS-KYBER', 'CRYSTALS-DILITHIUM', 'FALCON'],
+                    },
+                    'security_level': {
+                        'type': 'string',
+                        'required': False,
+                        'default': 'LEVEL1',
+                        'help': 'Target parameter set/security tier label.',
+                        'examples': ['LEVEL1', 'LEVEL3', 'LEVEL5'],
+                    },
+                    'key_dataset': {
+                        'type': 'string',
+                        'required': True,
+                        'help': 'DSN placeholder for where generated key material should be managed.',
+                        'examples': ['IBMUSER.PQC.KEYS'],
+                    },
+                    'notes': {
+                        'type': 'string',
+                        'required': False,
+                        'default': 'PILOT - VALIDATE DATASET ACLS AND ROTATION POLICY',
+                        'help': 'Free-form operations note recorded in SYSOUT.',
+                        'examples': ['PILOT IN LPAR2', 'ROTATE KEYS WEEKLY'],
+                    },
+                },
             },
-        },
-    },
-    'sort-basic': {
-        'description': 'Run SORT with a simple key on fixed records.',
-        'params': {
-            'job_name': {
-                'type': 'string',
-                'required': False,
-                'default': 'SORTJOB',
-                'format': 'jcl_job_name',
-                'help': 'JCL job name (1-8 chars, starts with A-Z, then A-Z0-9#$@).',
-                'examples': ['SORTJOB'],
-            },
-            'input_dataset': {
-                'type': 'string',
-                'required': True,
-                'help': 'Input DSN to sort (quoted in JCL).',
-                'examples': ['IBMUSER.INPUT'],
-            },
-            'output_dataset': {
-                'type': 'string',
-                'required': True,
-                'help': 'Output DSN for sorted records (quoted in JCL).',
-                'examples': ['IBMUSER.OUTPUT'],
-            },
-            'sort_fields': {
-                'type': 'string',
-                'required': False,
-                'default': '1,10,CH,A',
-                'help': 'DFSORT SORT FIELDS expression.',
-                'examples': ['1,10,CH,A', '1,8,CH,D'],
-            },
-        },
-    },
-    'lattice-crypto-demo': {
-        'description': 'Emit a lattice cryptography runbook stub to SYSOUT for mainframe operator workflows.',
-        'params': {
-            'job_name': {
-                'type': 'string',
-                'required': False,
-                'default': 'LATTICE',
-                'format': 'jcl_job_name',
-                'help': 'JCL job name (1-8 chars, starts with A-Z, then A-Z0-9#$@).',
-                'examples': ['LATTICE', 'PQCDEMO1'],
-            },
-            'algorithm': {
-                'type': 'string',
-                'required': False,
-                'default': 'CRYSTALS-KYBER',
-                'help': 'Lattice KEM or signature algorithm label for run documentation.',
-                'examples': ['CRYSTALS-KYBER', 'CRYSTALS-DILITHIUM', 'FALCON'],
-            },
-            'security_level': {
-                'type': 'string',
-                'required': False,
-                'default': 'LEVEL1',
-                'help': 'Target parameter set/security tier label.',
-                'examples': ['LEVEL1', 'LEVEL3', 'LEVEL5'],
-            },
-            'key_dataset': {
-                'type': 'string',
-                'required': True,
-                'help': 'DSN placeholder for where generated key material should be managed.',
-                'examples': ['IBMUSER.PQC.KEYS'],
-            },
-            'notes': {
-                'type': 'string',
-                'required': False,
-                'default': 'PILOT - VALIDATE DATASET ACLS AND ROTATION POLICY',
-                'help': 'Free-form operations note recorded in SYSOUT.',
-                'examples': ['PILOT IN LPAR2', 'ROTATE KEYS WEEKLY'],
-            },
-        },
-    },
-}
+        ],
+    }
+]
 
 
 def _unknown_template_error(template_id: str) -> UnknownTemplateError:
-    supported = sorted(TEMPLATE_SCHEMAS)
+    supported = sorted(_TEMPLATE_SCHEMAS)
     return UnknownTemplateError(
         code='unknown_template_id',
         message=f"Unknown template_id '{template_id}'",
@@ -218,8 +229,102 @@ def _normalize_job_name(value: str) -> str:
     return candidate
 
 
+def validate_template_pack_structure(template_packs: list[dict[str, Any]]) -> None:
+    errors: list[dict[str, Any]] = []
+    known_template_ids: set[str] = set()
+
+    for pack_index, pack in enumerate(template_packs):
+        pack_path = f'packs[{pack_index}]'
+        if not isinstance(pack.get('operations_pack_id'), str) or not pack['operations_pack_id'].strip():
+            errors.append({'path': f'{pack_path}.operations_pack_id', 'reason': 'missing_or_invalid'})
+        if not isinstance(pack.get('version'), str) or not pack['version'].strip():
+            errors.append({'path': f'{pack_path}.version', 'reason': 'missing_or_invalid'})
+        if not isinstance(pack.get('description'), str) or not pack['description'].strip():
+            errors.append({'path': f'{pack_path}.description', 'reason': 'missing_or_invalid'})
+
+        pack_params = pack.get('params', {})
+        if not isinstance(pack_params, dict):
+            errors.append({'path': f'{pack_path}.params', 'reason': 'invalid_type', 'expected': {'type': 'object'}})
+            pack_params = {}
+        pack_templates = pack.get('templates', [])
+        if not isinstance(pack_templates, list):
+            errors.append({'path': f'{pack_path}.templates', 'reason': 'invalid_type', 'expected': {'type': 'array'}})
+            pack_templates = []
+
+        for param_name, param_schema in pack_params.items():
+            if not isinstance(param_schema, dict) or not isinstance(param_schema.get('type'), str):
+                errors.append({'path': f'{pack_path}.params.{param_name}', 'reason': 'invalid_param_schema'})
+
+        for template_index, template in enumerate(pack_templates):
+            template_path = f'{pack_path}.templates[{template_index}]'
+            template_id = template.get('template_id')
+            if not isinstance(template_id, str) or not template_id.strip():
+                errors.append({'path': f'{template_path}.template_id', 'reason': 'missing_or_invalid'})
+                continue
+            if template_id in known_template_ids:
+                errors.append({'path': f'{template_path}.template_id', 'reason': 'duplicate_template_id', 'actual': template_id})
+            known_template_ids.add(template_id)
+            if not isinstance(template.get('params', {}), dict):
+                errors.append({'path': f'{template_path}.params', 'reason': 'invalid_type', 'expected': {'type': 'object'}})
+                continue
+            for param_name, param_schema in template.get('params', {}).items():
+                if not isinstance(param_schema, dict):
+                    errors.append({'path': f'{template_path}.params.{param_name}', 'reason': 'invalid_param_schema'})
+                elif 'type' not in param_schema and param_name not in pack_params:
+                    errors.append({'path': f'{template_path}.params.{param_name}.type', 'reason': 'missing_required_field'})
+
+    if errors:
+        raise TemplateSchemaError(
+            code='template_catalog_invalid',
+            message='Template pack definitions failed validation',
+            errors=errors,
+        )
+
+
+def _merge_param_schema(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    merged.update(override)
+    return merged
+
+
+def _flatten_template_packs(template_packs: list[dict[str, Any]]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    validate_template_pack_structure(template_packs)
+    flattened: dict[str, dict[str, Any]] = {}
+    template_to_pack: dict[str, dict[str, Any]] = {}
+
+    for pack in template_packs:
+        pack_params = pack.get('params', {})
+        pack_compat = deepcopy(pack.get('compatibility', {}))
+        for template in pack.get('templates', []):
+            template_id = template['template_id']
+            merged_params: dict[str, Any] = {}
+            for field_name, field_schema in pack_params.items():
+                template_override = template.get('params', {}).get(field_name, {})
+                merged_params[field_name] = _merge_param_schema(field_schema, template_override)
+            for field_name, field_schema in template.get('params', {}).items():
+                if field_name not in merged_params:
+                    merged_params[field_name] = dict(field_schema)
+
+            flattened[template_id] = {
+                'description': template['description'],
+                'params': merged_params,
+                'pack': {
+                    'operations_pack_id': pack['operations_pack_id'],
+                    'version': pack['version'],
+                    'description': pack['description'],
+                },
+                'compatibility': deepcopy(template.get('compatibility', pack_compat)),
+            }
+            template_to_pack[template_id] = pack
+
+    return flattened, template_to_pack
+
+
+_TEMPLATE_SCHEMAS, _TEMPLATE_TO_PACK = _flatten_template_packs(TEMPLATE_PACKS)
+
+
 def normalize_and_validate_template_params(template_id: str, params: dict[str, Any] | None) -> dict[str, str]:
-    spec = TEMPLATE_SCHEMAS.get(template_id)
+    spec = _TEMPLATE_SCHEMAS.get(template_id)
     if not spec:
         raise _unknown_template_error(template_id)
 
@@ -290,16 +395,43 @@ def normalize_and_validate_template_params(template_id: str, params: dict[str, A
     return normalized
 
 
-def get_template_schema(template_id: str) -> dict[str, Any]:
-    spec = TEMPLATE_SCHEMAS.get(template_id)
+def get_template_schema(template_id: str, include_pack_metadata: bool = False) -> dict[str, Any]:
+    spec = _TEMPLATE_SCHEMAS.get(template_id)
     if not spec:
         raise _unknown_template_error(template_id)
-    return {
+
+    payload = {
         'template_id': template_id,
         'description': spec['description'],
         'params': deepcopy(spec['params']),
     }
+    if include_pack_metadata:
+        payload['operations_pack'] = deepcopy(spec['pack'])
+        payload['compatibility'] = deepcopy(spec.get('compatibility', {}))
+    return payload
 
 
-def get_template_catalog() -> list[dict[str, Any]]:
-    return [get_template_schema(template_id) for template_id in sorted(TEMPLATE_SCHEMAS)]
+def get_template_catalog(
+    include_pack_metadata: bool = False,
+    grouped: bool = False,
+) -> list[dict[str, Any]]:
+    if grouped:
+        packs: list[dict[str, Any]] = []
+        for pack in TEMPLATE_PACKS:
+            pack_payload = {
+                'operations_pack_id': pack['operations_pack_id'],
+                'version': pack['version'],
+                'description': pack['description'],
+                'compatibility': deepcopy(pack.get('compatibility', {})),
+                'templates': [
+                    get_template_schema(item['template_id'], include_pack_metadata=include_pack_metadata)
+                    for item in pack.get('templates', [])
+                ],
+            }
+            packs.append(pack_payload)
+        return packs
+
+    return [
+        get_template_schema(template_id, include_pack_metadata=include_pack_metadata)
+        for template_id in sorted(_TEMPLATE_SCHEMAS)
+    ]

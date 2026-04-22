@@ -151,14 +151,20 @@ def index() -> FileResponse:
 
 
 @app.get('/api/templates')
-def templates_catalog() -> dict[str, Any]:
-    return {'templates': get_template_catalog()}
+def templates_catalog(
+    include_pack_metadata: bool = Query(default=False),
+    grouped: bool = Query(default=False),
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {'templates': get_template_catalog(include_pack_metadata=include_pack_metadata)}
+    if grouped:
+        payload['packs'] = get_template_catalog(include_pack_metadata=include_pack_metadata, grouped=True)
+    return payload
 
 
 @app.get('/api/templates/{template_id}')
-def template_details(template_id: str) -> dict[str, Any]:
+def template_details(template_id: str, include_pack_metadata: bool = Query(default=False)) -> dict[str, Any]:
     try:
-        return get_template_schema(template_id)
+        return get_template_schema(template_id, include_pack_metadata=include_pack_metadata)
     except UnknownTemplateError as exc:
         raise HTTPException(status_code=404, detail=exc.to_dict()) from exc
 

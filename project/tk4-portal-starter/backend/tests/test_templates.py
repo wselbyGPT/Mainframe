@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from common.template_schemas import TemplateSchemaError
-from common.templates import TemplateRenderError, render_template, validate_template_params
+from common.templates import TemplateRenderError, get_template_catalog, render_template, validate_template_params
 
 
 class TemplateRenderingTests(unittest.TestCase):
@@ -54,6 +54,12 @@ class TemplateValidationTests(unittest.TestCase):
         with self.assertRaises(TemplateSchemaError) as exc:
             validate_template_params('lattice-crypto-demo', {'job_name': 'PQCDEMO'})
         self.assertEqual(exc.exception.errors[0]['path'], 'params.key_dataset')
+
+    def test_flat_catalog_response_is_backward_compatible(self) -> None:
+        catalog = get_template_catalog()
+        hello = next(item for item in catalog if item['template_id'] == 'hello-world')
+        self.assertIn('params', hello)
+        self.assertNotIn('operations_pack', hello)
 
 
 if __name__ == '__main__':
