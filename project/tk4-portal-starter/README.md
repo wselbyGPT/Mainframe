@@ -500,3 +500,10 @@ curl -N \
 ```
 
 The server resumes with events where `id > 42`, preventing duplicate delivery during reconnect.
+
+## Platform and operations backlog
+
+- **Automated IPL smoke test**: add a single command workflow that boots TK4- and verifies JES2, TSO, and CICS regions are all up before reporting success.
+- **Snapshot/restore workflows**: provide one-command DASD backup and rollback helpers to make destructive experimentation safe and fast to recover.
+- **Environment profiles**: ship `dev`, `demo`, and `chaos` profiles with distinct PARMLIB and JCL defaults so teams can switch operating modes quickly.
+- **Capacity dashboard**: consolidate CPU, DASD, spool depth, and initiator utilization into one operational view for faster triage.
