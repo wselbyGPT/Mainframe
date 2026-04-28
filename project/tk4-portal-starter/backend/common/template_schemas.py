@@ -5,6 +5,7 @@ from copy import deepcopy
 from typing import Any
 
 JOB_NAME_PATTERN = re.compile(r'^[A-Z][A-Z0-9#$@]{0,7}$')
+ALLOWED_APPROVAL_STATUSES = {'approved', 'draft', 'deprecated'}
 
 
 class TemplateSchemaError(ValueError):
@@ -50,6 +51,7 @@ TEMPLATE_PACKS: list[dict[str, Any]] = [
         'templates': [
             {
                 'template_id': 'hello-world',
+                'approval_status': 'approved',
                 'description': 'Print a literal message to SYSOUT via IEBGENER.',
                 'compatibility': {
                     'target_images': ['TK4-'],
@@ -68,6 +70,7 @@ TEMPLATE_PACKS: list[dict[str, Any]] = [
             },
             {
                 'template_id': 'idcams-listcat',
+                'approval_status': 'approved',
                 'description': 'Run IDCAMS LISTCAT for a catalog or level filter.',
                 'compatibility': {
                     'target_images': ['TK4-'],
@@ -85,6 +88,7 @@ TEMPLATE_PACKS: list[dict[str, Any]] = [
             },
             {
                 'template_id': 'iebgener-copy',
+                'approval_status': 'approved',
                 'description': 'Copy one sequential dataset to another via IEBGENER.',
                 'compatibility': {
                     'target_images': ['TK4-'],
@@ -108,6 +112,7 @@ TEMPLATE_PACKS: list[dict[str, Any]] = [
             },
             {
                 'template_id': 'sort-basic',
+                'approval_status': 'approved',
                 'description': 'Run SORT with a simple key on fixed records.',
                 'compatibility': {
                     'target_images': ['TK4-'],
@@ -138,6 +143,7 @@ TEMPLATE_PACKS: list[dict[str, Any]] = [
             },
             {
                 'template_id': 'lattice-crypto-demo',
+                'approval_status': 'draft',
                 'description': 'Emit a lattice cryptography runbook stub to SYSOUT for mainframe operator workflows.',
                 'compatibility': {
                     'target_images': ['TK4-'],
@@ -264,6 +270,16 @@ def validate_template_pack_structure(template_packs: list[dict[str, Any]]) -> No
             if template_id in known_template_ids:
                 errors.append({'path': f'{template_path}.template_id', 'reason': 'duplicate_template_id', 'actual': template_id})
             known_template_ids.add(template_id)
+            approval_status = template.get('approval_status', 'approved')
+            if not isinstance(approval_status, str) or approval_status not in ALLOWED_APPROVAL_STATUSES:
+                errors.append(
+                    {
+                        'path': f'{template_path}.approval_status',
+                        'reason': 'invalid_value',
+                        'expected': {'one_of': sorted(ALLOWED_APPROVAL_STATUSES)},
+                        'actual': approval_status,
+                    }
+                )
             if not isinstance(template.get('params', {}), dict):
                 errors.append({'path': f'{template_path}.params', 'reason': 'invalid_type', 'expected': {'type': 'object'}})
                 continue
@@ -307,6 +323,7 @@ def _flatten_template_packs(template_packs: list[dict[str, Any]]) -> tuple[dict[
 
             flattened[template_id] = {
                 'description': template['description'],
+                'approval_status': template.get('approval_status', 'approved'),
                 'params': merged_params,
                 'template_param_overrides': deepcopy(template.get('params', {})),
                 'pack': {
@@ -406,6 +423,7 @@ def get_template_schema(template_id: str, include_pack_metadata: bool = False) -
     payload = {
         'template_id': template_id,
         'description': spec['description'],
+        'approval_status': spec['approval_status'],
         'params': deepcopy(spec['params']),
     }
     if include_pack_metadata:
@@ -421,25 +439,42 @@ def get_template_schema(template_id: str, include_pack_metadata: bool = False) -
 def get_template_catalog(
     include_pack_metadata: bool = False,
     grouped: bool = False,
+    approval_status: str | None = 'approved',
 ) -> list[dict[str, Any]]:
+    if approval_status == 'all':
+        selected_approval_statuses: set[str] | None = None
+    elif approval_status is None:
+        selected_approval_statuses = None
+    else:
+        selected_approval_statuses = {approval_status}
+
+    def _include_template(template_payload: dict[str, Any]) -> bool:
+        if selected_approval_statuses is None:
+            return True
+        return str(template_payload.get('approval_status')) in selected_approval_statuses
+
     if grouped:
         packs: list[dict[str, Any]] = []
         for pack in TEMPLATE_PACKS:
+            pack_templates = []
+            for item in pack.get('templates', []):
+                template_payload = get_template_schema(item['template_id'], include_pack_metadata=include_pack_metadata)
+                if _include_template(template_payload):
+                    pack_templates.append(template_payload)
             pack_payload = {
                 'operations_pack_id': pack['operations_pack_id'],
                 'version': pack['version'],
                 'description': pack['description'],
                 'params': deepcopy(pack.get('params', {})),
                 'compatibility': deepcopy(pack.get('compatibility', {})),
-                'templates': [
-                    get_template_schema(item['template_id'], include_pack_metadata=include_pack_metadata)
-                    for item in pack.get('templates', [])
-                ],
+                'templates': pack_templates,
             }
             packs.append(pack_payload)
         return packs
 
-    return [
-        get_template_schema(template_id, include_pack_metadata=include_pack_metadata)
-        for template_id in sorted(_TEMPLATE_SCHEMAS)
-    ]
+    catalog: list[dict[str, Any]] = []
+    for template_id in sorted(_TEMPLATE_SCHEMAS):
+        template_payload = get_template_schema(template_id, include_pack_metadata=include_pack_metadata)
+        if _include_template(template_payload):
+            catalog.append(template_payload)
+    return catalog

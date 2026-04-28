@@ -192,10 +192,26 @@ def index() -> FileResponse:
 def templates_catalog(
     include_pack_metadata: bool = Query(default=False),
     grouped: bool = Query(default=False),
+    include_unapproved: bool = Query(
+        default=False,
+        description='When true, include templates with approval_status other than approved.',
+    ),
 ) -> dict[str, Any]:
-    payload: dict[str, Any] = {'templates': get_template_catalog(include_pack_metadata=include_pack_metadata)}
+    approval_filter = 'all' if include_unapproved else 'approved'
+    payload: dict[str, Any] = {
+        'templates': get_template_catalog(
+            include_pack_metadata=include_pack_metadata,
+            approval_status=approval_filter,
+        ),
+        'approval_filter': approval_filter,
+        'include_unapproved': include_unapproved,
+    }
     if grouped:
-        payload['packs'] = get_template_catalog(include_pack_metadata=include_pack_metadata, grouped=True)
+        payload['packs'] = get_template_catalog(
+            include_pack_metadata=include_pack_metadata,
+            grouped=True,
+            approval_status=approval_filter,
+        )
     return payload
 
 
