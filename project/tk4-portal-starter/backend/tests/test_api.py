@@ -49,13 +49,27 @@ class TemplateApiTests(unittest.TestCase):
         response = self.client.get('/api/templates')
         self.assertEqual(response.status_code, 200)
         payload = response.json()
+        self.assertEqual(payload['approval_filter'], 'approved')
+        self.assertFalse(payload['include_unapproved'])
         template_ids = {item['template_id'] for item in payload['templates']}
         self.assertEqual(
             template_ids,
-            {'hello-world', 'idcams-listcat', 'iebgener-copy', 'sort-basic', 'lattice-crypto-demo'},
+            {'hello-world', 'idcams-listcat', 'iebgener-copy', 'sort-basic'},
         )
         hello_world = next(item for item in payload['templates'] if item['template_id'] == 'hello-world')
         self.assertEqual(hello_world['params']['job_name']['default'], 'HELLO1')
+        self.assertEqual(hello_world['approval_status'], 'approved')
+
+    def test_get_templates_catalog_include_unapproved(self) -> None:
+        response = self.client.get('/api/templates', params={'include_unapproved': True})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload['approval_filter'], 'all')
+        self.assertTrue(payload['include_unapproved'])
+        template_ids = {item['template_id'] for item in payload['templates']}
+        self.assertIn('lattice-crypto-demo', template_ids)
+        lattice_template = next(item for item in payload['templates'] if item['template_id'] == 'lattice-crypto-demo')
+        self.assertEqual(lattice_template['approval_status'], 'draft')
 
 
     def test_get_templates_catalog_grouped_with_pack_metadata(self) -> None:

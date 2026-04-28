@@ -130,12 +130,12 @@ async function apiFetch(url, options = {}, requiresAuth = false) {
 }
 
 async function loadTemplates() {
-  const response = await apiFetch('/api/templates');
+  const response = await apiFetch('/api/templates?include_unapproved=false');
   if (!response.ok) {
     throw new Error(`Failed to load templates: ${response.status}`);
   }
   const payload = await response.json();
-  state.templates = payload.templates || [];
+  state.templates = (payload.templates || []).filter((template) => template.approval_status === 'approved');
   renderTemplateOptions();
 }
 
