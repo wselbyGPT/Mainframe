@@ -3,8 +3,17 @@ const state = {
   selectedTemplate: null,
   activeJobId: null,
   eventSource: null,
+  accessToken: null,
+  refreshToken: null,
+  loginStatus: 'logged_out',
+  loginError: null,
 };
 
+const authStatusNode = document.getElementById('authStatus');
+const loginUsernameInput = document.getElementById('loginUsername');
+const loginPasswordInput = document.getElementById('loginPassword');
+const loginBtn = document.getElementById('loginBtn');
+const loginResult = document.getElementById('loginResult');
 const templateSelect = document.getElementById('templateSelect');
 const paramsForm = document.getElementById('paramsForm');
 const submitBtn = document.getElementById('submitBtn');
@@ -23,8 +32,105 @@ const downloadSpoolBtn = document.getElementById('downloadSpoolBtn');
 const spoolMetaNode = document.getElementById('spoolMeta');
 const spoolContentNode = document.getElementById('spoolContent');
 
+function setLoginStatus(status, message = '') {
+  state.loginStatus = status;
+  state.loginError = message;
+  const labels = {
+    logged_out: 'Logged out',
+    logging_in: 'Logging in...',
+    login_failed: 'Login failed',
+    logged_in: 'Logged in',
+    token_expired: 'Token expired',
+  };
+  authStatusNode.textContent = labels[status] || status;
+  loginResult.textContent = message;
+}
+
+function clearAuthState(expired = false) {
+  state.accessToken = null;
+  state.refreshToken = null;
+  setLoginStatus(expired ? 'token_expired' : 'logged_out', expired ? 'Session expired. Please log in again.' : '');
+}
+
+async function login() {
+  const username = loginUsernameInput.value.trim();
+  const password = loginPasswordInput.value;
+  if (!username || !password) {
+    setLoginStatus('login_failed', 'Username and password are required.');
+    return;
+  }
+
+  setLoginStatus('logging_in');
+  const response = await fetch('/api/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username, password }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    clearAuthState(false);
+    setLoginStatus('login_failed', payload?.detail?.message || 'Invalid credentials.');
+    return;
+  }
+
+  state.accessToken = payload.access_token || null;
+  state.refreshToken = payload.refresh_token || null;
+  loginPasswordInput.value = '';
+  setLoginStatus('logged_in', `Authenticated as ${payload.username || username}.`);
+}
+
+async function refreshAccessToken() {
+  if (!state.refreshToken) {
+    clearAuthState(true);
+    return false;
+  }
+  const response = await fetch('/api/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refresh_token: state.refreshToken }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    clearAuthState(true);
+    return false;
+  }
+  state.accessToken = payload.access_token || null;
+  if (payload.refresh_token) {
+    state.refreshToken = payload.refresh_token;
+  }
+  setLoginStatus('logged_in', `Session refreshed for ${payload.username || loginUsernameInput.value.trim() || 'user'}.`);
+  return true;
+}
+
+async function apiFetch(url, options = {}, requiresAuth = false) {
+  const headers = new Headers(options.headers || {});
+  if (requiresAuth) {
+    if (!state.accessToken) {
+      clearAuthState(false);
+      throw new Error('Not authenticated. Please log in.');
+    }
+    headers.set('Authorization', `Bearer ${state.accessToken}`);
+  }
+
+  const requestOptions = { ...options, headers };
+  let response = await fetch(url, requestOptions);
+  if (response.status === 401 && requiresAuth) {
+    const refreshed = await refreshAccessToken();
+    if (!refreshed || !state.accessToken) {
+      throw new Error('Authentication expired. Please log in again.');
+    }
+    headers.set('Authorization', `Bearer ${state.accessToken}`);
+    response = await fetch(url, { ...options, headers });
+    if (response.status === 401) {
+      clearAuthState(true);
+      throw new Error('Authentication failed after token refresh. Please log in again.');
+    }
+  }
+  return response;
+}
+
 async function loadTemplates() {
-  const response = await fetch('/api/templates');
+  const response = await apiFetch('/api/templates');
   if (!response.ok) {
     throw new Error(`Failed to load templates: ${response.status}`);
   }
@@ -99,11 +205,11 @@ async function submitJob() {
   const submittedBy = submittedByInput.value.trim() || 'web-ui';
   const params = collectParams();
 
-  const response = await fetch('/api/jobs', {
+  const response = await apiFetch('/api/jobs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ template_id: templateId, submitted_by: submittedBy, params }),
-  });
+  }, true);
 
   const payload = await response.json();
   submitResult.textContent = JSON.stringify(payload, null, 2);
@@ -140,7 +246,7 @@ function addEventLine(eventType, data) {
 }
 
 async function refreshJobStatus(jobId) {
-  const response = await fetch(`/api/jobs/${jobId}`);
+  const response = await apiFetch(`/api/jobs/${jobId}`);
   if (!response.ok) {
     return;
   }
@@ -151,7 +257,7 @@ async function refreshJobStatus(jobId) {
 }
 
 async function refreshOpsDashboard() {
-  const response = await fetch('/api/ops/dashboard');
+  const response = await apiFetch('/api/ops/dashboard');
   if (!response.ok) {
     opsHealthNode.textContent = 'Unable to load ops dashboard.';
     return;
@@ -189,7 +295,7 @@ async function refreshSpoolView(jobId = state.activeJobId) {
     spoolContentNode.textContent = '';
     return;
   }
-  const response = await fetch(spoolUrl(jobId));
+  const response = await apiFetch(spoolUrl(jobId));
   if (!response.ok) {
     spoolMetaNode.textContent = `Spool unavailable for job ${jobId}.`;
     spoolContentNode.textContent = '';
@@ -242,6 +348,12 @@ submitBtn.addEventListener('click', () => {
     submitResult.textContent = JSON.stringify({ error: error.message }, null, 2);
   });
 });
+loginBtn.addEventListener('click', () => {
+  login().catch((error) => {
+    clearAuthState(false);
+    setLoginStatus('login_failed', error.message);
+  });
+});
 refreshSpoolBtn.addEventListener('click', () => {
   refreshSpoolView().catch((error) => {
     spoolMetaNode.textContent = `Error loading spool: ${error.message}`;
@@ -257,3 +369,4 @@ refreshOpsDashboard();
 setInterval(() => {
   refreshOpsDashboard().catch(() => {});
 }, 10000);
+setLoginStatus('logged_out');

@@ -12,6 +12,22 @@
       <p class="lead">Submit template-based jobs and monitor stage progress live.</p>
 
       <section class="card">
+        <h2>Authentication</h2>
+        <p>
+          Status:
+          <strong id="authStatus">Logged out</strong>
+        </p>
+        <label for="loginUsername">Username</label>
+        <input id="loginUsername" type="text" autocomplete="username" />
+
+        <label for="loginPassword">Password</label>
+        <input id="loginPassword" type="password" autocomplete="current-password" />
+
+        <button id="loginBtn" type="button">Log in</button>
+        <pre id="loginResult"></pre>
+      </section>
+
+      <section class="card">
         <h2>Submit job</h2>
         <label for="templateSelect">Template</label>
         <select id="templateSelect"></select>
